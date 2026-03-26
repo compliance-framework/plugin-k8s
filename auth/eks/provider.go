@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -18,6 +19,10 @@ import (
 const (
 	StsTokenPrefix  = "k8s-aws-v1."
 	clusterIDHeader = "x-k8s-aws-id"
+	// requestPresignParam is the value for X-Amz-Expires. STS ignores this
+	// parameter (tokens expire 15 min after x-amz-date regardless), but the
+	// EKS authenticator validates it is present and between 0 and 900.
+	requestPresignParam = 60
 )
 
 // TokenGenerator produces a bearer token for Kubernetes API authentication.
@@ -39,7 +44,10 @@ type STSTokenGenerator struct {
 func (g *STSTokenGenerator) GetToken(ctx context.Context, clusterName string) (string, error) {
 	presigned, err := g.Client.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}, func(opts *sts.PresignOptions) {
 		opts.ClientOptions = append(opts.ClientOptions, func(o *sts.Options) {
-			o.APIOptions = append(o.APIOptions, smithyhttp.AddHeaderValue(clusterIDHeader, clusterName))
+			o.APIOptions = append(o.APIOptions,
+				smithyhttp.SetHeaderValue(clusterIDHeader, clusterName),
+				smithyhttp.SetHeaderValue("X-Amz-Expires", strconv.Itoa(requestPresignParam)),
+			)
 		})
 	})
 	if err != nil {

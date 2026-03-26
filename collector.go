@@ -115,7 +115,11 @@ func resolveGVRs(client discovery.DiscoveryInterface, resourceNames []string) (m
 			if strings.Contains(apiResource.Name, "/") {
 				continue
 			}
-			if _, exists := gvrMap[lowName]; !exists {
+			existing, exists := gvrMap[lowName]
+			// Prefer the core API group (empty group, i.e. v1) over
+			// extension APIs (e.g. metrics.k8s.io) that reuse the same
+			// resource names such as "nodes" and "pods".
+			if !exists || (existing.Group != "" && gv.Group == "") {
 				gvrMap[lowName] = gv.WithResource(apiResource.Name)
 				clusterScoped[lowName] = !apiResource.Namespaced
 			}
