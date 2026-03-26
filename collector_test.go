@@ -81,6 +81,37 @@ func TestResolveGVRs(t *testing.T) {
 		}
 	})
 
+	t.Run("prefers core API group over extensions", func(t *testing.T) {
+		// Simulate metrics.k8s.io appearing before core v1 (as seen on EKS with metrics-server)
+		metricsFirst := []*metav1.APIResourceList{
+			{
+				GroupVersion: "metrics.k8s.io/v1beta1",
+				APIResources: []metav1.APIResource{
+					{Name: "nodes", Namespaced: false, Kind: "NodeMetrics"},
+					{Name: "pods", Namespaced: true, Kind: "PodMetrics"},
+				},
+			},
+			{
+				GroupVersion: "v1",
+				APIResources: []metav1.APIResource{
+					{Name: "nodes", Namespaced: false, Kind: "Node"},
+					{Name: "pods", Namespaced: true, Kind: "Pod"},
+				},
+			},
+		}
+		metricsFirstDisco := newFakeDiscovery(metricsFirst)
+		gvrMap, _, err := resolveGVRs(metricsFirstDisco, []string{"nodes", "pods"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gvrMap["nodes"].Group != "" {
+			t.Fatalf("expected core group for nodes, got %q", gvrMap["nodes"].Group)
+		}
+		if gvrMap["pods"].Group != "" {
+			t.Fatalf("expected core group for pods, got %q", gvrMap["pods"].Group)
+		}
+	})
+
 	t.Run("case insensitive", func(t *testing.T) {
 		gvrMap, _, err := resolveGVRs(disco, []string{"Nodes"})
 		if err != nil {
