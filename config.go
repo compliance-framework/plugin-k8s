@@ -9,6 +9,10 @@ import (
 	"github.com/compliance-framework/plugin-k8s/auth"
 )
 
+func normalizeResourceName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // reservedInputKeys are top-level keys managed by the plugin that users cannot
 // override via policy_input.
 var reservedInputKeys = map[string]bool{
@@ -98,10 +102,12 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	}
 	resourceSet := make(map[string]bool, len(resources))
 	for i, r := range resources {
-		if strings.TrimSpace(r) == "" {
+		normalized := normalizeResourceName(r)
+		if normalized == "" {
 			return nil, fmt.Errorf("resource at index %d is empty", i)
 		}
-		resourceSet[strings.ToLower(r)] = true
+		resources[i] = normalized
+		resourceSet[normalized] = true
 	}
 
 	// --- main_resources (optional; defaults to all resources) ---
@@ -111,12 +117,14 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 			return nil, fmt.Errorf("could not parse main_resources: %w", err)
 		}
 		for i, r := range mainResources {
-			if strings.TrimSpace(r) == "" {
+			normalized := normalizeResourceName(r)
+			if normalized == "" {
 				return nil, fmt.Errorf("main_resources at index %d is empty", i)
 			}
-			if !resourceSet[strings.ToLower(r)] {
+			if !resourceSet[normalized] {
 				return nil, fmt.Errorf("main_resources entry %q is not present in resources", r)
 			}
+			mainResources[i] = normalized
 		}
 	}
 	if len(mainResources) == 0 {

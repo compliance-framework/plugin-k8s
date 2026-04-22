@@ -19,7 +19,7 @@ The plugin receives configuration as flat string fields from the CCF agent. All 
 | `namespace_include` | No | JSON array of namespaces to include (empty = all) |
 | `namespace_exclude` | No | JSON array of namespaces to exclude |
 | `policy_labels` | No | JSON object of key-value labels added to evidence metadata |
-| `policy_input` | No | JSON object of custom fields merged into the Rego input document. Reserved keys: `schema_version`, `source`, `main`, `context`. |
+| `policy_input` | No | JSON object of custom fields merged into the Rego input document. Reserved keys: `schema_version`, `source`, `main`, `context`, `subject`, `fleet`. |
 
 ### Cluster Configuration
 
@@ -40,9 +40,11 @@ Each entry in `clusters` has:
 During `Init`, the plugin registers one `SubjectTemplate` per entry in `main_resources` (e.g. `k8s-pods`, `k8s-nodes`). Each template has the identity label keys:
 
 - `cluster_name`
-- `namespace` (empty for cluster-scoped resources)
+- `namespace` (only for namespaced resources)
 - `app_name` (resolved from `metadata.labels` via `identity_labels`; falls back to `metadata.name`)
 - `name`
+
+For cluster-scoped resources such as `nodes`, the emitted evidence labels still include `namespace` with an empty string so label contracts stay stable, but the corresponding `SubjectTemplate` omits `namespace` from its identity keys and rendering.
 
 During `Eval`, every concrete Kubernetes resource instance that matches a `main_resources` type becomes its own subject and receives its own evidence for every configured policy path. Policies are invoked once per `(resource instance, policy path)` pair. A single `CreateEvidence` call is made per cluster, batching all evidence produced for that cluster.
 
@@ -122,7 +124,7 @@ Every policy evaluation receives one `main` resource and the full cluster snapsh
 }
 ```
 
-Any fields from `policy_input` config are merged at the top level. Reserved keys (`schema_version`, `source`, `main`, `context`) cannot be overridden.
+Any fields from `policy_input` config are merged at the top level. Reserved keys (`schema_version`, `source`, `main`, `context`, `subject`, `fleet`) cannot be overridden.
 
 ### Field reference
 
@@ -131,8 +133,10 @@ Any fields from `policy_input` config are merged at the top level. Reserved keys
 | `input.schema_version` | string | Plugin | Always `"v2"` |
 | `input.source` | string | Plugin | Always `"plugin-kubernetes"` |
 | `input.main` | object | Plugin | The full unstructured Kubernetes resource currently being evaluated |
+| `input.subject` | object | Plugin | Normalized subject identity for the resource under evaluation (`cluster_name`, `resource_type`, `name`, `identifier`, `identity_labels`, and `namespace` for namespaced resources) |
 | `input.context.cluster` | object | Plugin | `{name, region, provider}` for the cluster this resource belongs to |
 | `input.context.resources` | object | Plugin | Map of resource type → array of Kubernetes objects (full cluster snapshot, including the main resource) |
+| `input.fleet` | object | Plugin | Multi-cluster snapshot keyed by cluster name, each with `{cluster, resources}` |
 | `input.<custom_key>` | any | `policy_input` | User-defined fields |
 
 ### Example: writing a policy

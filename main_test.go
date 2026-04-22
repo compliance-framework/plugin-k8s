@@ -229,9 +229,12 @@ func TestEvalLoopBehavior(t *testing.T) {
 		if len(first.subjects) != 2 {
 			t.Fatalf("expected 2 subjects per evidence, got %d", len(first.subjects))
 		}
+		if first.subjects[0].GetType() != proto.SubjectType_SUBJECT_TYPE_COMPONENT {
+			t.Fatalf("expected per-resource subject type component, got %v", first.subjects[0].GetType())
+		}
 	})
 
-	t.Run("cluster-scoped resource has no namespace label", func(t *testing.T) {
+	t.Run("cluster-scoped resource has empty namespace label", func(t *testing.T) {
 		collector := &fakeCollector{
 			results: map[string]*ClusterResources{
 				"prod": {
@@ -260,8 +263,8 @@ func TestEvalLoopBehavior(t *testing.T) {
 		if len(evaluator.calls) != 1 {
 			t.Fatalf("expected 1 call, got %d", len(evaluator.calls))
 		}
-		if _, ok := evaluator.calls[0].labels["namespace"]; ok {
-			t.Fatalf("cluster-scoped resource should not have namespace label")
+		if evaluator.calls[0].labels["namespace"] != "" {
+			t.Fatalf("cluster-scoped resource should have empty namespace label, got %q", evaluator.calls[0].labels["namespace"])
 		}
 		// Fallback: app_name should equal the node's name when no label matches.
 		if evaluator.calls[0].labels["app_name"] != "n1" {
@@ -545,6 +548,16 @@ func TestBuildSubjectTemplates(t *testing.T) {
 	wantKeys := []string{"cluster_name", "namespace", "app_name", "name"}
 	if len(keys) != len(wantKeys) {
 		t.Fatalf("expected identity keys %v, got %v", wantKeys, keys)
+	}
+	nodeKeys := byName["k8s-nodes"].GetIdentityLabelKeys()
+	wantNodeKeys := []string{"cluster_name", "app_name", "name"}
+	if len(nodeKeys) != len(wantNodeKeys) {
+		t.Fatalf("expected node identity keys %v, got %v", wantNodeKeys, nodeKeys)
+	}
+	for i := range wantNodeKeys {
+		if nodeKeys[i] != wantNodeKeys[i] {
+			t.Fatalf("expected node identity keys %v, got %v", wantNodeKeys, nodeKeys)
+		}
 	}
 }
 

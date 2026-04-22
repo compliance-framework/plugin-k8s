@@ -157,6 +157,20 @@ func TestPluginConfigParse(t *testing.T) {
 		}
 	})
 
+	t.Run("resources are trimmed and lowercased", func(t *testing.T) {
+		cfg := &PluginConfig{Clusters: validClusters, Resources: `[" Nodes ","PODS"]`, MainResources: `[" pods "]`}
+		parsed, err := cfg.Parse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(parsed.Resources) != 2 || parsed.Resources[0] != "nodes" || parsed.Resources[1] != "pods" {
+			t.Fatalf("expected normalized resources, got %v", parsed.Resources)
+		}
+		if len(parsed.MainResources) != 1 || parsed.MainResources[0] != "pods" {
+			t.Fatalf("expected normalized main_resources, got %v", parsed.MainResources)
+		}
+	})
+
 	t.Run("invalid namespace_include JSON", func(t *testing.T) {
 		_, err := (&PluginConfig{Clusters: validClusters, Resources: validResources, NamespaceInclude: "bad"}).Parse()
 		if err == nil || !strings.Contains(err.Error(), "could not parse namespace_include") {

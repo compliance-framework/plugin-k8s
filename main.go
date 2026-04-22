@@ -286,7 +286,8 @@ func extractResourceIdentity(resource map[string]interface{}) (namespace, name s
 
 // resolveIdentityLabels resolves each configured identity key by walking the
 // candidate list against metadata.labels on the resource; falls back to
-// metadata.name when none match so the key is never empty.
+// metadata.name when none match. The resolved value may still be empty if
+// metadata.name is missing or empty.
 func resolveIdentityLabels(resource map[string]interface{}, config map[string][]string) map[string]string {
 	resolved := make(map[string]string, len(config))
 	var resourceName string
@@ -353,9 +354,7 @@ func buildInstanceLabels(base map[string]string, instance *resourceInstance) map
 	labels["cluster_name"] = instance.ClusterName
 	labels["resource_type"] = instance.ResourceType
 	labels["name"] = instance.Name
-	if instance.Namespace != "" {
-		labels["namespace"] = instance.Namespace
-	}
+	labels["namespace"] = instance.Namespace
 	// Identity labels (e.g. app_name) may override nothing — but a user-provided
 	// policy_labels entry for the same key stays authoritative. Merge them LAST
 	// only when not already set.
@@ -383,7 +382,7 @@ func resourceInstanceIdentifier(instance *resourceInstance) string {
 func buildInstanceSubjects(instance *resourceInstance, clusterComponent *proto.Component) []*proto.Subject {
 	return []*proto.Subject{
 		{
-			Type:       proto.SubjectType_SUBJECT_TYPE_INVENTORY_ITEM,
+			Type:       proto.SubjectType_SUBJECT_TYPE_COMPONENT,
 			Identifier: resourceInstanceIdentifier(instance),
 		},
 		{
@@ -520,14 +519,24 @@ func buildRegoInput(main map[string]interface{}, subject map[string]interface{},
 	return input
 }
 
+func isClusterScopedResourceType(resourceType string) bool {
+	switch normalizeResourceName(resourceType) {
+	case "nodes", "namespaces", "persistentvolumes", "clusterroles", "clusterrolebindings", "customresourcedefinitions", "mutatingwebhookconfigurations", "validatingwebhookconfigurations", "storageclasses", "runtimeclasses", "priorityclasses", "csinodes", "volumeattachments":
+		return true
+	default:
+		return false
+	}
+}
+
 // buildSubjectTemplates produces one SubjectTemplate per main resource type.
 // Namespaced types include namespace and app_name in identity; cluster-scoped
-// types (best-effort by name) omit namespace. The agent treats the union of
-// IdentityLabelKeys as the unique key.
+// types omit namespace from template identity and rendering. The agent treats
+// the configured IdentityLabelKeys as the unique key.
 func buildSubjectTemplates(mainResources []string) []*proto.SubjectTemplate {
 	templates := make([]*proto.SubjectTemplate, 0, len(mainResources))
 	for _, resourceType := range mainResources {
 		templateName := "k8s-" + strings.ToLower(resourceType)
+		isClusterScoped := isClusterScopedResourceType(resourceType)
 		identityKeys := []string{"cluster_name", "namespace", "app_name", "name"}
 		labelSchema := []*proto.SubjectLabelSchema{
 			{Key: "cluster_name", Description: "Name of the Kubernetes cluster this resource belongs to"},
@@ -536,12 +545,26 @@ func buildSubjectTemplates(mainResources []string) []*proto.SubjectTemplate {
 			{Key: "name", Description: "Value of metadata.name on the Kubernetes resource"},
 			{Key: "resource_type", Description: "Kubernetes resource type (e.g. pods, nodes, deployments)"},
 		}
+		titleTemplate := fmt.Sprintf("Kubernetes %s {{ .namespace }}/{{ .name }} in {{ .cluster_name }}", resourceType)
+		descriptionTemplate := fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }} under namespace {{ .namespace }}", resourceType, "{{ .name }}")
+
+		if isClusterScoped {
+			identityKeys = []string{"cluster_name", "app_name", "name"}
+			labelSchema = []*proto.SubjectLabelSchema{
+				{Key: "cluster_name", Description: "Name of the Kubernetes cluster this resource belongs to"},
+				{Key: "app_name", Description: "Application name resolved from metadata.labels via identity_labels config, falling back to metadata.name"},
+				{Key: "name", Description: "Value of metadata.name on the Kubernetes resource"},
+				{Key: "resource_type", Description: "Kubernetes resource type (e.g. pods, nodes, deployments)"},
+			}
+			titleTemplate = fmt.Sprintf("Kubernetes %s {{ .name }} in {{ .cluster_name }}", resourceType)
+			descriptionTemplate = fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }}", resourceType, "{{ .name }}")
+		}
 
 		templates = append(templates, &proto.SubjectTemplate{
 			Name:                templateName,
 			Type:                proto.SubjectType_SUBJECT_TYPE_COMPONENT,
-			TitleTemplate:       fmt.Sprintf("Kubernetes %s {{ .namespace }}/{{ .name }} in {{ .cluster_name }}", resourceType),
-			DescriptionTemplate: fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }} under namespace {{ .namespace }}", resourceType, "{{ .name }}"),
+			TitleTemplate:       titleTemplate,
+			DescriptionTemplate: descriptionTemplate,
 			PurposeTemplate:     fmt.Sprintf("Individual Kubernetes %s instance evaluated by the Kubernetes plugin.", resourceType),
 			IdentityLabelKeys:   identityKeys,
 			LabelSchema:         labelSchema,
