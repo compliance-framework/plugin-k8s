@@ -306,6 +306,51 @@ func TestEvalLoopBehavior(t *testing.T) {
 		if apiHelper.createCalls != 0 {
 			t.Fatalf("expected no CreateEvidence calls, got %d", apiHelper.createCalls)
 		}
+		if strings.Contains(err.Error(), "prod//") {
+			t.Fatalf("expected cluster-scoped resource location without empty namespace, got: %v", err)
+		}
+	})
+
+	t.Run("flushes evidence incrementally when batch size is exceeded", func(t *testing.T) {
+		pods := make([]map[string]interface{}, 0, evidenceBatchSize+5)
+		for i := range evidenceBatchSize + 5 {
+			pods = append(pods, newPodItem(fmt.Sprintf("pod-%d", i), "app", fmt.Sprintf("app-%d", i)))
+		}
+		collector := &fakeCollector{
+			results: map[string]*ClusterResources{
+				"prod": {
+					Name: "prod", Region: "us-east-1",
+					Resources: map[string][]map[string]interface{}{"pods": pods},
+				},
+			},
+		}
+		evaluator := &fakePolicyEvaluator{}
+		apiHelper := &fakeAPIHelper{}
+		plugin := &Plugin{
+			Logger: hclog.NewNullLogger(),
+			parsedConfig: &ParsedConfig{
+				Clusters:       []auth.ClusterConfig{{Name: "prod", Region: "us-east-1", ClusterName: "prod-eks"}},
+				Resources:      []string{"pods"},
+				MainResources:  []string{"pods"},
+				IdentityLabels: defaultIdentityLabels,
+			},
+			collector: collector,
+			evaluator: evaluator,
+		}
+
+		resp, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper)
+		if err != nil {
+			t.Fatalf("unexpected eval error: %v", err)
+		}
+		if resp.GetStatus() != proto.ExecutionStatus_SUCCESS {
+			t.Fatalf("expected success, got %s", resp.GetStatus().String())
+		}
+		if apiHelper.createCalls < 2 {
+			t.Fatalf("expected multiple CreateEvidence flushes, got %d", apiHelper.createCalls)
+		}
+		if len(apiHelper.evidence) != evidenceBatchSize+5 {
+			t.Fatalf("expected %d evidences, got %d", evidenceBatchSize+5, len(apiHelper.evidence))
+		}
 	})
 
 	t.Run("collection failure returns error", func(t *testing.T) {
@@ -515,6 +560,11 @@ func TestResourceInstanceIdentifier(t *testing.T) {
 			"sanitizes noisy cluster name",
 			&resourceInstance{ClusterName: "Prod East", ResourceType: "pods", Namespace: "Default", Name: "API/1", IdentityLabels: map[string]string{"app_name": "Platform API"}},
 			"k8s-pods/prod-east/default/platform-api/api-1",
+		},
+		{
+			"falls back to resource name when app_name is empty",
+			&resourceInstance{ClusterName: "prod", ResourceType: "pods", Namespace: "app", Name: "api-1", IdentityLabels: map[string]string{"app_name": ""}},
+			"k8s-pods/prod/app/api-1/api-1",
 		},
 	}
 	for _, tc := range tests {

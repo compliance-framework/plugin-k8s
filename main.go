@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	schemaVersionV2 = "v2"
-	sourcePluginK8s = "plugin-kubernetes"
+	schemaVersionV2   = "v2"
+	sourcePluginK8s   = "plugin-kubernetes"
+	evidenceBatchSize = 100
 )
 
 // PolicyEvaluator wraps OPA policy execution so eval loop behavior can be tested with mocks.
@@ -175,6 +176,16 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 	totalEvaluatorCalls := 0
 	successfulPolicyCalls := 0
 	var accumulatedErrors error
+	flushEvidences := func(clusterName string, evidences []*proto.Evidence) error {
+		if len(evidences) == 0 {
+			return nil
+		}
+		if err := apiHelper.CreateEvidence(ctx, evidences); err != nil {
+			p.Logger.Error("Error creating evidence", "cluster", clusterName, "error", err)
+			return err
+		}
+		return nil
+	}
 
 	fleetContext := buildFleetContext(clusterByName, clusterData)
 
@@ -221,9 +232,19 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 						regoInput,
 					)
 					clusterEvidences = append(clusterEvidences, evidences...)
+					if len(clusterEvidences) >= evidenceBatchSize {
+						if sendErr := flushEvidences(clusterName, clusterEvidences); sendErr != nil {
+							return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
+						}
+						clusterEvidences = clusterEvidences[:0]
+					}
 					if evalErr != nil {
 						p.Logger.Warn("Policy evaluation failed", "policy_path", policyPath, "resource", instance.Name, "namespace", instance.Namespace, "cluster", clusterName, "error", evalErr)
-						accumulatedErrors = errors.Join(accumulatedErrors, fmt.Errorf("policy %s [%s/%s/%s]: %w", policyPath, clusterName, instance.Namespace, instance.Name, evalErr))
+						resourceLocation := fmt.Sprintf("%s/%s", clusterName, instance.Name)
+						if instance.Namespace != "" {
+							resourceLocation = fmt.Sprintf("%s/%s/%s", clusterName, instance.Namespace, instance.Name)
+						}
+						accumulatedErrors = errors.Join(accumulatedErrors, fmt.Errorf("policy %s [%s]: %w", policyPath, resourceLocation, evalErr))
 						continue
 					}
 					successfulPolicyCalls++
@@ -232,8 +253,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 		}
 
 		if len(clusterEvidences) > 0 {
-			if sendErr := apiHelper.CreateEvidence(ctx, clusterEvidences); sendErr != nil {
-				p.Logger.Error("Error creating evidence", "cluster", clusterName, "error", sendErr)
+			if sendErr := flushEvidences(clusterName, clusterEvidences); sendErr != nil {
 				return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
 			}
 		}
@@ -368,6 +388,10 @@ func buildInstanceLabels(base map[string]string, instance *resourceInstance) map
 
 // resourceInstanceIdentifier composes the stable subject identifier for a single resource.
 func resourceInstanceIdentifier(instance *resourceInstance) string {
+	appIdentity := instance.IdentityLabels["app_name"]
+	if appIdentity == "" {
+		appIdentity = instance.Name
+	}
 	parts := []string{
 		"k8s-" + sanitizeIdentifier(instance.ResourceType),
 		sanitizeIdentifier(instance.ClusterName),
@@ -375,7 +399,7 @@ func resourceInstanceIdentifier(instance *resourceInstance) string {
 	if instance.Namespace != "" {
 		parts = append(parts, sanitizeIdentifier(instance.Namespace))
 	}
-	parts = append(parts, sanitizeIdentifier(instance.IdentityLabels["app_name"]))
+	parts = append(parts, sanitizeIdentifier(appIdentity))
 	parts = append(parts, sanitizeIdentifier(instance.Name))
 	return strings.Join(parts, "/")
 }

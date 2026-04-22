@@ -166,6 +166,9 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 			}
 			normalizedIdentityLabels[trimmedKey] = candidates
 		}
+		if _, ok := normalizedIdentityLabels["app_name"]; !ok {
+			return nil, errors.New("identity_labels must include app_name")
+		}
 		identityLabels = normalizedIdentityLabels
 	}
 	if len(identityLabels) == 0 {

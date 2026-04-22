@@ -339,6 +339,13 @@ func TestPluginConfigParse(t *testing.T) {
 		}
 	})
 
+	t.Run("identity_labels without app_name rejected", func(t *testing.T) {
+		_, err := (&PluginConfig{Clusters: validClusters, Resources: validResources, IdentityLabels: `{"env":["environment"]}`}).Parse()
+		if err == nil || !strings.Contains(err.Error(), "must include app_name") {
+			t.Fatalf("expected app_name validation error, got: %v", err)
+		}
+	})
+
 	t.Run("empty provider defaults to eks", func(t *testing.T) {
 		cfg := &PluginConfig{
 			Clusters:  validClusters,
