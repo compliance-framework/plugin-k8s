@@ -15,7 +15,9 @@ var reservedInputKeys = map[string]bool{
 	"schema_version": true,
 	"source":         true,
 	"main":           true,
+	"subject":        true,
 	"context":        true,
+	"fleet":          true,
 }
 
 // defaultIdentityLabels is the fallback identity-label config used when the

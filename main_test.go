@@ -178,6 +178,16 @@ func TestEvalLoopBehavior(t *testing.T) {
 		if _, ok := input["main"].(map[string]interface{}); !ok {
 			t.Fatalf("expected input.main to be a map")
 		}
+		subjectPayload, ok := input["subject"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected input.subject to be a map")
+		}
+		if subjectPayload["cluster_name"] != "prod" {
+			t.Fatalf("expected subject.cluster_name=prod, got %v", subjectPayload["cluster_name"])
+		}
+		if subjectPayload["resource_type"] != "pods" {
+			t.Fatalf("expected subject.resource_type=pods, got %v", subjectPayload["resource_type"])
+		}
 		ctxPayload, ok := input["context"].(map[string]interface{})
 		if !ok {
 			t.Fatalf("expected input.context to be a map")
@@ -191,6 +201,25 @@ func TestEvalLoopBehavior(t *testing.T) {
 		}
 		if len(resources["pods"]) != 2 || len(resources["nodes"]) != 1 {
 			t.Fatalf("expected full cluster snapshot in context, got pods=%d nodes=%d", len(resources["pods"]), len(resources["nodes"]))
+		}
+		fleetPayload, ok := input["fleet"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected input.fleet to be a map")
+		}
+		fleetClusters, ok := fleetPayload["clusters"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected fleet.clusters map")
+		}
+		prodCluster, ok := fleetClusters["prod"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected fleet.clusters.prod map")
+		}
+		prodResources, ok := prodCluster["resources"].(map[string][]map[string]interface{})
+		if !ok {
+			t.Fatalf("expected fleet cluster resources map")
+		}
+		if len(prodResources["pods"]) != 2 || len(prodResources["nodes"]) != 1 {
+			t.Fatalf("expected fleet cluster snapshot, got pods=%d nodes=%d", len(prodResources["pods"]), len(prodResources["nodes"]))
 		}
 		if input["min_replicas"].(float64) != 3 {
 			t.Fatalf("expected policy_input merged")
@@ -438,6 +467,23 @@ func TestResolveIdentityLabels(t *testing.T) {
 		}
 	})
 
+	t.Run("uses pod template labels for workload resources", func(t *testing.T) {
+		res := map[string]interface{}{
+			"metadata": map[string]interface{}{"name": "deploy-1"},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"labels": map[string]interface{}{"app.kubernetes.io/name": "api"},
+					},
+				},
+			},
+		}
+		got := resolveIdentityLabels(res, config)
+		if got["app_name"] != "api" {
+			t.Fatalf("expected app_name from pod template labels, got %q", got["app_name"])
+		}
+	})
+
 	t.Run("handles missing metadata", func(t *testing.T) {
 		got := resolveIdentityLabels(map[string]interface{}{}, config)
 		if got["app_name"] != "" {
@@ -492,6 +538,9 @@ func TestBuildSubjectTemplates(t *testing.T) {
 	if _, ok := byName["k8s-nodes"]; !ok {
 		t.Fatalf("missing k8s-nodes template")
 	}
+	if byName["k8s-pods"].GetType() != proto.SubjectType_SUBJECT_TYPE_COMPONENT {
+		t.Fatalf("expected k8s-pods template type component, got %v", byName["k8s-pods"].GetType())
+	}
 	keys := byName["k8s-pods"].GetIdentityLabelKeys()
 	wantKeys := []string{"cluster_name", "namespace", "app_name", "name"}
 	if len(keys) != len(wantKeys) {
@@ -524,13 +573,22 @@ func TestInitBeforeConfigureReturnsError(t *testing.T) {
 
 func TestBuildRegoInput(t *testing.T) {
 	main := map[string]interface{}{"metadata": map[string]interface{}{"name": "pod-1", "namespace": "app"}}
+	subject := map[string]interface{}{"cluster_name": "prod", "resource_type": "pods", "name": "pod-1"}
 	ctxPayload := map[string]interface{}{
 		"cluster":   map[string]interface{}{"name": "prod"},
 		"resources": map[string][]map[string]interface{}{"nodes": {{"metadata": map[string]interface{}{"name": "n1"}}}},
 	}
+	fleetPayload := map[string]interface{}{
+		"clusters": map[string]interface{}{
+			"prod": map[string]interface{}{
+				"cluster":   map[string]interface{}{"name": "prod"},
+				"resources": map[string][]map[string]interface{}{"nodes": {{"metadata": map[string]interface{}{"name": "n1"}}}},
+			},
+		},
+	}
 	userInput := map[string]interface{}{"min_replicas": 3}
 
-	input := buildRegoInput(main, ctxPayload, userInput)
+	input := buildRegoInput(main, subject, ctxPayload, fleetPayload, userInput)
 
 	if input["schema_version"] != schemaVersionV2 {
 		t.Fatalf("expected schema_version v2")
@@ -541,8 +599,14 @@ func TestBuildRegoInput(t *testing.T) {
 	if input["main"] == nil {
 		t.Fatalf("expected main populated")
 	}
+	if input["subject"] == nil {
+		t.Fatalf("expected subject populated")
+	}
 	if input["context"] == nil {
 		t.Fatalf("expected context populated")
+	}
+	if input["fleet"] == nil {
+		t.Fatalf("expected fleet populated")
 	}
 	if input["min_replicas"] != 3 {
 		t.Fatalf("expected user policy_input merged")

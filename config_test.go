@@ -186,10 +186,10 @@ func TestPluginConfigParse(t *testing.T) {
 	})
 
 	t.Run("reserved key in policy_input rejected", func(t *testing.T) {
-		for _, key := range []string{"schema_version", "source", "main", "context"} {
+		for _, key := range []string{"schema_version", "source", "main", "subject", "context", "fleet"} {
 			_, err := (&PluginConfig{
-				Clusters:  validClusters,
-				Resources: validResources,
+				Clusters:    validClusters,
+				Resources:   validResources,
 				PolicyInput: `{"` + key + `":"override"}`,
 			}).Parse()
 			if err == nil || !strings.Contains(err.Error(), "reserved key") {

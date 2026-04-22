@@ -172,16 +172,11 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 	actors := defaultActors()
 	activities := defaultActivities()
 
-	mainResourceSet := make(map[string]bool, len(p.parsedConfig.MainResources))
-	for _, r := range p.parsedConfig.MainResources {
-		mainResourceSet[strings.ToLower(r)] = true
-	}
-
 	totalEvaluatorCalls := 0
 	successfulPolicyCalls := 0
 	var accumulatedErrors error
 
-	allClustersContext := buildAllClustersContext(clusterByName, clusterData)
+	fleetContext := buildFleetContext(clusterByName, clusterData)
 
 	for clusterName, cluster := range clusterData {
 		cfg, ok := clusterByName[clusterName]
@@ -191,6 +186,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 
 		clusterComponent := buildClusterComponent(cfg)
 		clusterInventory := buildClusterInventory(cfg)
+		clusterContext := buildClusterContext(cfg, cluster)
 
 		clusterEvidences := make([]*proto.Evidence, 0)
 
@@ -209,7 +205,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 				inventoryItems := append([]*proto.InventoryItem{buildInstanceInventory(instance)}, clusterInventory...)
 				components := []*proto.Component{clusterComponent}
 
-				regoInput := buildRegoInput(item, allClustersContext, p.parsedConfig.PolicyInput)
+				regoInput := buildRegoInput(item, buildInputSubject(instance), clusterContext, fleetContext, p.parsedConfig.PolicyInput)
 
 				for _, policyPath := range req.GetPolicyPaths() {
 					totalEvaluatorCalls++
@@ -294,25 +290,24 @@ func extractResourceIdentity(resource map[string]interface{}) (namespace, name s
 func resolveIdentityLabels(resource map[string]interface{}, config map[string][]string) map[string]string {
 	resolved := make(map[string]string, len(config))
 	var resourceName string
-	var metaLabels map[string]interface{}
+	labelSources := extractLabelSources(resource)
 
 	if meta, ok := resource["metadata"].(map[string]interface{}); ok {
 		if n, ok := meta["name"].(string); ok {
 			resourceName = n
-		}
-		if lbls, ok := meta["labels"].(map[string]interface{}); ok {
-			metaLabels = lbls
 		}
 	}
 
 	for key, candidates := range config {
 		value := ""
 		for _, candidate := range candidates {
-			if metaLabels == nil {
-				break
+			for _, labels := range labelSources {
+				if v, ok := labels[candidate].(string); ok && v != "" {
+					value = v
+					break
+				}
 			}
-			if v, ok := metaLabels[candidate].(string); ok && v != "" {
-				value = v
+			if value != "" {
 				break
 			}
 		}
@@ -322,6 +317,33 @@ func resolveIdentityLabels(resource map[string]interface{}, config map[string][]
 		resolved[key] = value
 	}
 	return resolved
+}
+
+func extractLabelSources(resource map[string]interface{}) []map[string]interface{} {
+	labelSources := make([]map[string]interface{}, 0, 3)
+
+	if meta, ok := resource["metadata"].(map[string]interface{}); ok {
+		if labels, ok := meta["labels"].(map[string]interface{}); ok {
+			labelSources = append(labelSources, labels)
+		}
+	}
+
+	if spec, ok := resource["spec"].(map[string]interface{}); ok {
+		if template, ok := spec["template"].(map[string]interface{}); ok {
+			if templateMeta, ok := template["metadata"].(map[string]interface{}); ok {
+				if labels, ok := templateMeta["labels"].(map[string]interface{}); ok {
+					labelSources = append(labelSources, labels)
+				}
+			}
+		}
+		if selector, ok := spec["selector"].(map[string]interface{}); ok {
+			if matchLabels, ok := selector["matchLabels"].(map[string]interface{}); ok {
+				labelSources = append(labelSources, matchLabels)
+			}
+		}
+	}
+
+	return labelSources
 }
 
 // buildInstanceLabels merges base policy labels with per-instance identity labels.
@@ -422,6 +444,25 @@ func buildClusterInventory(cluster auth.ClusterConfig) []*proto.InventoryItem {
 	}
 }
 
+func buildInputSubject(instance *resourceInstance) map[string]interface{} {
+	identityLabels := make(map[string]interface{}, len(instance.IdentityLabels))
+	for k, v := range instance.IdentityLabels {
+		identityLabels[k] = v
+	}
+
+	subject := map[string]interface{}{
+		"cluster_name":    instance.ClusterName,
+		"resource_type":   instance.ResourceType,
+		"name":            instance.Name,
+		"identifier":      resourceInstanceIdentifier(instance),
+		"identity_labels": identityLabels,
+	}
+	if instance.Namespace != "" {
+		subject["namespace"] = instance.Namespace
+	}
+	return subject
+}
+
 // buildClusterContext assembles the cluster metadata + raw resource snapshot
 // exposed to policies as input.context.
 func buildClusterContext(cluster auth.ClusterConfig, data *ClusterResources) map[string]interface{} {
@@ -435,14 +476,11 @@ func buildClusterContext(cluster auth.ClusterConfig, data *ClusterResources) map
 	}
 }
 
-// buildAllClustersContext aggregates all clusters' metadata and resources for multi-regional policies.
-// Policies can now access data from all clusters to derive cross-cluster compliance decisions.
-func buildAllClustersContext(
+func buildFleetContext(
 	clusterByName map[string]auth.ClusterConfig,
 	clusterData map[string]*ClusterResources,
 ) map[string]interface{} {
-	clusters := make([]map[string]interface{}, 0, len(clusterData))
-	allResources := make(map[string]map[string]interface{})
+	clusters := make(map[string]interface{}, len(clusterData))
 
 	for clusterName, data := range clusterData {
 		cfg, ok := clusterByName[clusterName]
@@ -455,29 +493,26 @@ func buildAllClustersContext(
 			"region":   cfg.Region,
 			"provider": cfg.EffectiveProvider(),
 		}
-		clusters = append(clusters, clusterInfo)
-
-		for resourceType, resources := range data.Resources {
-			if _, exists := allResources[resourceType]; !exists {
-				allResources[resourceType] = make(map[string]interface{})
-			}
-			allResources[resourceType][clusterName] = resources
+		clusters[clusterName] = map[string]interface{}{
+			"cluster":   clusterInfo,
+			"resources": data.Resources,
 		}
 	}
 
 	return map[string]interface{}{
-		"clusters":  clusters,
-		"resources": allResources,
+		"clusters": clusters,
 	}
 }
 
 // buildRegoInput shapes the per-resource Rego input document.
-func buildRegoInput(main map[string]interface{}, clusterContext map[string]interface{}, policyInput map[string]interface{}) map[string]interface{} {
+func buildRegoInput(main map[string]interface{}, subject map[string]interface{}, clusterContext map[string]interface{}, fleet map[string]interface{}, policyInput map[string]interface{}) map[string]interface{} {
 	input := map[string]interface{}{
 		"schema_version": schemaVersionV2,
 		"source":         sourcePluginK8s,
 		"main":           main,
+		"subject":        subject,
 		"context":        clusterContext,
+		"fleet":          fleet,
 	}
 	for k, v := range policyInput {
 		input[k] = v
@@ -504,7 +539,7 @@ func buildSubjectTemplates(mainResources []string) []*proto.SubjectTemplate {
 
 		templates = append(templates, &proto.SubjectTemplate{
 			Name:                templateName,
-			Type:                proto.SubjectType_SUBJECT_TYPE_INVENTORY_ITEM,
+			Type:                proto.SubjectType_SUBJECT_TYPE_COMPONENT,
 			TitleTemplate:       fmt.Sprintf("Kubernetes %s {{ .namespace }}/{{ .name }} in {{ .cluster_name }}", resourceType),
 			DescriptionTemplate: fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }} under namespace {{ .namespace }}", resourceType, "{{ .name }}"),
 			PurposeTemplate:     fmt.Sprintf("Individual Kubernetes %s instance evaluated by the Kubernetes plugin.", resourceType),
