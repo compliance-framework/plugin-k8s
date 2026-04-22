@@ -46,7 +46,7 @@ During `Init`, the plugin registers one `SubjectTemplate` per entry in `main_res
 
 For cluster-scoped resources such as `nodes`, the emitted evidence labels still include `namespace` with an empty string so label contracts stay stable, but the corresponding `SubjectTemplate` omits `namespace` from its identity keys and rendering.
 
-During `Eval`, every concrete Kubernetes resource instance that matches a `main_resources` type becomes its own subject and receives its own evidence for every configured policy path. Policies are invoked once per `(resource instance, policy path)` pair. A single `CreateEvidence` call is made per cluster, batching all evidence produced for that cluster.
+During `Eval`, every concrete Kubernetes resource instance that matches a `main_resources` type becomes its own subject and receives its own evidence for every configured policy path. Policies are invoked once per `(resource instance, policy path)` pair. Evidence is batched per cluster, but may be sent via multiple `CreateEvidence` calls when the `evidenceBatchSize` threshold is reached.
 
 ## Configuration Examples
 
