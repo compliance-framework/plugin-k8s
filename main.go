@@ -181,6 +181,8 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 	successfulPolicyCalls := 0
 	var accumulatedErrors error
 
+	allClustersContext := buildAllClustersContext(clusterByName, clusterData)
+
 	for clusterName, cluster := range clusterData {
 		cfg, ok := clusterByName[clusterName]
 		if !ok {
@@ -189,7 +191,6 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 
 		clusterComponent := buildClusterComponent(cfg)
 		clusterInventory := buildClusterInventory(cfg)
-		clusterContext := buildClusterContext(cfg, cluster)
 
 		clusterEvidences := make([]*proto.Evidence, 0)
 
@@ -208,7 +209,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 				inventoryItems := append([]*proto.InventoryItem{buildInstanceInventory(instance)}, clusterInventory...)
 				components := []*proto.Component{clusterComponent}
 
-				regoInput := buildRegoInput(item, clusterContext, p.parsedConfig.PolicyInput)
+				regoInput := buildRegoInput(item, allClustersContext, p.parsedConfig.PolicyInput)
 
 				for _, policyPath := range req.GetPolicyPaths() {
 					totalEvaluatorCalls++
@@ -431,6 +432,42 @@ func buildClusterContext(cluster auth.ClusterConfig, data *ClusterResources) map
 			"provider": cluster.EffectiveProvider(),
 		},
 		"resources": data.Resources,
+	}
+}
+
+// buildAllClustersContext aggregates all clusters' metadata and resources for multi-regional policies.
+// Policies can now access data from all clusters to derive cross-cluster compliance decisions.
+func buildAllClustersContext(
+	clusterByName map[string]auth.ClusterConfig,
+	clusterData map[string]*ClusterResources,
+) map[string]interface{} {
+	clusters := make([]map[string]interface{}, 0, len(clusterData))
+	allResources := make(map[string]map[string]interface{})
+
+	for clusterName, data := range clusterData {
+		cfg, ok := clusterByName[clusterName]
+		if !ok {
+			cfg = auth.ClusterConfig{Name: clusterName, Region: data.Region}
+		}
+
+		clusterInfo := map[string]interface{}{
+			"name":     cfg.Name,
+			"region":   cfg.Region,
+			"provider": cfg.EffectiveProvider(),
+		}
+		clusters = append(clusters, clusterInfo)
+
+		for resourceType, resources := range data.Resources {
+			if _, exists := allResources[resourceType]; !exists {
+				allResources[resourceType] = make(map[string]interface{})
+			}
+			allResources[resourceType][clusterName] = resources
+		}
+	}
+
+	return map[string]interface{}{
+		"clusters":  clusters,
+		"resources": allResources,
 	}
 }
 
