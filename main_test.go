@@ -503,18 +503,18 @@ func TestResourceInstanceIdentifier(t *testing.T) {
 	}{
 		{
 			"namespaced",
-			&resourceInstance{ClusterName: "prod", ResourceType: "pods", Namespace: "app-ns", Name: "api-1"},
-			"k8s-pods/prod/app-ns/api-1",
+			&resourceInstance{ClusterName: "prod", ResourceType: "pods", Namespace: "app-ns", Name: "api-1", IdentityLabels: map[string]string{"app_name": "api"}},
+			"k8s-pods/prod/app-ns/api/api-1",
 		},
 		{
 			"cluster-scoped omits namespace segment",
-			&resourceInstance{ClusterName: "prod", ResourceType: "nodes", Name: "node-1"},
-			"k8s-nodes/prod/node-1",
+			&resourceInstance{ClusterName: "prod", ResourceType: "nodes", Name: "node-1", IdentityLabels: map[string]string{"app_name": "node-1"}},
+			"k8s-nodes/prod/node-1/node-1",
 		},
 		{
 			"sanitizes noisy cluster name",
-			&resourceInstance{ClusterName: "Prod East", ResourceType: "pods", Namespace: "Default", Name: "API/1"},
-			"k8s-pods/prod-east/default/api-1",
+			&resourceInstance{ClusterName: "Prod East", ResourceType: "pods", Namespace: "Default", Name: "API/1", IdentityLabels: map[string]string{"app_name": "Platform API"}},
+			"k8s-pods/prod-east/default/platform-api/api-1",
 		},
 	}
 	for _, tc := range tests {

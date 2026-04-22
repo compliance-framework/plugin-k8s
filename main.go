@@ -375,6 +375,7 @@ func resourceInstanceIdentifier(instance *resourceInstance) string {
 	if instance.Namespace != "" {
 		parts = append(parts, sanitizeIdentifier(instance.Namespace))
 	}
+	parts = append(parts, sanitizeIdentifier(instance.IdentityLabels["app_name"]))
 	parts = append(parts, sanitizeIdentifier(instance.Name))
 	return strings.Join(parts, "/")
 }

@@ -171,6 +171,20 @@ func TestPluginConfigParse(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate resources after normalization rejected", func(t *testing.T) {
+		_, err := (&PluginConfig{Clusters: validClusters, Resources: `["Pods"," pods "]`}).Parse()
+		if err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+			t.Fatalf("expected duplicate resource error, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate main_resources after normalization rejected", func(t *testing.T) {
+		_, err := (&PluginConfig{Clusters: validClusters, Resources: `["pods","nodes"]`, MainResources: `["Pods"," pods "]`}).Parse()
+		if err == nil || !strings.Contains(err.Error(), "main_resources contains duplicate entry") {
+			t.Fatalf("expected duplicate main_resources error, got: %v", err)
+		}
+	})
+
 	t.Run("invalid namespace_include JSON", func(t *testing.T) {
 		_, err := (&PluginConfig{Clusters: validClusters, Resources: validResources, NamespaceInclude: "bad"}).Parse()
 		if err == nil || !strings.Contains(err.Error(), "could not parse namespace_include") {
@@ -301,7 +315,7 @@ func TestPluginConfigParse(t *testing.T) {
 		cfg := &PluginConfig{
 			Clusters:       validClusters,
 			Resources:      validResources,
-			IdentityLabels: `{"app_name":["custom-label"],"env":["environment"]}`,
+			IdentityLabels: `{" app_name ":[" custom-label "],"env":[" environment "]}`,
 		}
 		parsed, err := cfg.Parse()
 		if err != nil {
@@ -312,6 +326,9 @@ func TestPluginConfigParse(t *testing.T) {
 		}
 		if _, ok := parsed.IdentityLabels["env"]; !ok {
 			t.Fatalf("expected env identity key")
+		}
+		if got := parsed.IdentityLabels["env"]; len(got) != 1 || got[0] != "environment" {
+			t.Fatalf("expected env=[environment], got %v", got)
 		}
 	})
 

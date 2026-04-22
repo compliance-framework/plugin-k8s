@@ -106,6 +106,9 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 		if normalized == "" {
 			return nil, fmt.Errorf("resource at index %d is empty", i)
 		}
+		if resourceSet[normalized] {
+			return nil, fmt.Errorf("resources contains duplicate entry %q after normalization", normalized)
+		}
 		resources[i] = normalized
 		resourceSet[normalized] = true
 	}
@@ -113,6 +116,7 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	// --- main_resources (optional; defaults to all resources) ---
 	var mainResources []string
 	if strings.TrimSpace(c.MainResources) != "" {
+		mainResourceSet := map[string]bool{}
 		if err := json.Unmarshal([]byte(c.MainResources), &mainResources); err != nil {
 			return nil, fmt.Errorf("could not parse main_resources: %w", err)
 		}
@@ -124,7 +128,11 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 			if !resourceSet[normalized] {
 				return nil, fmt.Errorf("main_resources entry %q is not present in resources", r)
 			}
+			if mainResourceSet[normalized] {
+				return nil, fmt.Errorf("main_resources contains duplicate entry %q after normalization", normalized)
+			}
 			mainResources[i] = normalized
+			mainResourceSet[normalized] = true
 		}
 	}
 	if len(mainResources) == 0 {
@@ -137,19 +145,28 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 		if err := json.Unmarshal([]byte(c.IdentityLabels), &identityLabels); err != nil {
 			return nil, fmt.Errorf("could not parse identity_labels: %w", err)
 		}
+		normalizedIdentityLabels := make(map[string][]string, len(identityLabels))
 		for key, candidates := range identityLabels {
-			if strings.TrimSpace(key) == "" {
+			trimmedKey := strings.TrimSpace(key)
+			if trimmedKey == "" {
 				return nil, errors.New("identity_labels contains an empty key")
 			}
+			if _, exists := normalizedIdentityLabels[trimmedKey]; exists {
+				return nil, fmt.Errorf("identity_labels contains duplicate key %q after trimming", trimmedKey)
+			}
 			if len(candidates) == 0 {
-				return nil, fmt.Errorf("identity_labels key %q must have at least one candidate label", key)
+				return nil, fmt.Errorf("identity_labels key %q must have at least one candidate label", trimmedKey)
 			}
 			for i, candidate := range candidates {
-				if strings.TrimSpace(candidate) == "" {
-					return nil, fmt.Errorf("identity_labels key %q has empty candidate at index %d", key, i)
+				trimmedCandidate := strings.TrimSpace(candidate)
+				if trimmedCandidate == "" {
+					return nil, fmt.Errorf("identity_labels key %q has empty candidate at index %d", trimmedKey, i)
 				}
+				candidates[i] = trimmedCandidate
 			}
+			normalizedIdentityLabels[trimmedKey] = candidates
 		}
+		identityLabels = normalizedIdentityLabels
 	}
 	if len(identityLabels) == 0 {
 		identityLabels = make(map[string][]string, len(defaultIdentityLabels))
