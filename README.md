@@ -114,12 +114,18 @@ Every policy evaluation receives one `main` resource and the full cluster snapsh
   "schema_version": "v2",
   "source": "plugin-kubernetes",
   "main": { /* the single Kubernetes resource being evaluated (unstructured) */ },
+  "subject": {
+    /* stable per-resource identity metadata derived for evidence and policy use */
+  },
   "context": {
     "cluster": { "name": "prod", "region": "us-east-1", "provider": "eks" },
     "resources": {
       "nodes": [ /* every collected node in this cluster */ ],
       "pods":  [ /* every collected pod in this cluster — includes the one in input.main */ ]
     }
+  },
+  "fleet": {
+    /* multi-cluster collection metadata always included in the evaluation input */
   }
 }
 ```
