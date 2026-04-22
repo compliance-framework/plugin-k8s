@@ -445,11 +445,21 @@ func buildInstanceInventory(instance *resourceInstance) *proto.InventoryItem {
 
 func buildClusterComponent(cluster auth.ClusterConfig) *proto.Component {
 	clusterID := fmt.Sprintf("k8s-cluster/%s", sanitizeIdentifier(cluster.Name))
+	description := fmt.Sprintf("Kubernetes cluster %q", cluster.Name)
+	if provider := cluster.EffectiveProvider(); provider != "" {
+		description = fmt.Sprintf("%s using provider %s", description, provider)
+	}
+	if cluster.ClusterName != "" {
+		description = fmt.Sprintf("%s (cluster name %q)", description, cluster.ClusterName)
+	}
+	if cluster.Region != "" {
+		description = fmt.Sprintf("%s in region %s", description, cluster.Region)
+	}
 	return &proto.Component{
 		Identifier:  clusterID,
 		Type:        "service",
 		Title:       fmt.Sprintf("Kubernetes Cluster: %s", cluster.Name),
-		Description: fmt.Sprintf("Kubernetes cluster %q in region %s", cluster.ClusterName, cluster.Region),
+		Description: description,
 		Purpose:     "Kubernetes cluster providing resource data for compliance evaluation.",
 	}
 }
@@ -544,46 +554,24 @@ func buildRegoInput(main map[string]interface{}, subject map[string]interface{},
 	return input
 }
 
-func isClusterScopedResourceType(resourceType string) bool {
-	switch normalizeResourceName(resourceType) {
-	case "nodes", "namespaces", "persistentvolumes", "clusterroles", "clusterrolebindings", "customresourcedefinitions", "mutatingwebhookconfigurations", "validatingwebhookconfigurations", "storageclasses", "runtimeclasses", "priorityclasses", "csinodes", "volumeattachments":
-		return true
-	default:
-		return false
-	}
-}
-
 // buildSubjectTemplates produces one SubjectTemplate per main resource type.
-// Namespaced types include namespace and app_name in identity; cluster-scoped
-// types omit namespace from template identity and rendering. The agent treats
-// the configured IdentityLabelKeys as the unique key.
+// Templates always include namespace in the label schema/identity contract, and
+// use conditional rendering so cluster-scoped resources with empty namespace do
+// not produce awkward titles or descriptions.
 func buildSubjectTemplates(mainResources []string) []*proto.SubjectTemplate {
 	templates := make([]*proto.SubjectTemplate, 0, len(mainResources))
 	for _, resourceType := range mainResources {
 		templateName := "k8s-" + strings.ToLower(resourceType)
-		isClusterScoped := isClusterScopedResourceType(resourceType)
 		identityKeys := []string{"cluster_name", "namespace", "app_name", "name"}
 		labelSchema := []*proto.SubjectLabelSchema{
 			{Key: "cluster_name", Description: "Name of the Kubernetes cluster this resource belongs to"},
-			{Key: "namespace", Description: "Namespace of the resource (empty for cluster-scoped resources)"},
+			{Key: "namespace", Description: "Namespace of the resource for namespaced resources; empty for cluster-scoped resources"},
 			{Key: "app_name", Description: "Application name resolved from metadata.labels via identity_labels config, falling back to metadata.name"},
 			{Key: "name", Description: "Value of metadata.name on the Kubernetes resource"},
 			{Key: "resource_type", Description: "Kubernetes resource type (e.g. pods, nodes, deployments)"},
 		}
-		titleTemplate := fmt.Sprintf("Kubernetes %s {{ .namespace }}/{{ .name }} in {{ .cluster_name }}", resourceType)
-		descriptionTemplate := fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }} under namespace {{ .namespace }}", resourceType, "{{ .name }}")
-
-		if isClusterScoped {
-			identityKeys = []string{"cluster_name", "app_name", "name"}
-			labelSchema = []*proto.SubjectLabelSchema{
-				{Key: "cluster_name", Description: "Name of the Kubernetes cluster this resource belongs to"},
-				{Key: "app_name", Description: "Application name resolved from metadata.labels via identity_labels config, falling back to metadata.name"},
-				{Key: "name", Description: "Value of metadata.name on the Kubernetes resource"},
-				{Key: "resource_type", Description: "Kubernetes resource type (e.g. pods, nodes, deployments)"},
-			}
-			titleTemplate = fmt.Sprintf("Kubernetes %s {{ .name }} in {{ .cluster_name }}", resourceType)
-			descriptionTemplate = fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }}", resourceType, "{{ .name }}")
-		}
+		titleTemplate := fmt.Sprintf("Kubernetes %s {{ if .namespace }}{{ .namespace }}/{{ end }}{{ .name }} in {{ .cluster_name }}", resourceType)
+		descriptionTemplate := fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }}{{ if .namespace }} under namespace {{ .namespace }}{{ end }}", resourceType, "{{ .name }}")
 
 		templates = append(templates, &proto.SubjectTemplate{
 			Name:                templateName,

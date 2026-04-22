@@ -619,6 +619,23 @@ func TestResourceInstanceIdentifier(t *testing.T) {
 	}
 }
 
+func TestBuildClusterComponent(t *testing.T) {
+	t.Run("kubeconfig cluster omits empty region and cluster_name", func(t *testing.T) {
+		component := buildClusterComponent(auth.ClusterConfig{Name: "local", Provider: "kubeconfig"})
+		if component.GetDescription() != `Kubernetes cluster "local" using provider kubeconfig` {
+			t.Fatalf("unexpected description: %q", component.GetDescription())
+		}
+	})
+
+	t.Run("eks cluster includes provider cluster_name and region", func(t *testing.T) {
+		component := buildClusterComponent(auth.ClusterConfig{Name: "prod", Provider: "eks", ClusterName: "prod-eks", Region: "us-east-1"})
+		want := `Kubernetes cluster "prod" using provider eks (cluster name "prod-eks") in region us-east-1`
+		if component.GetDescription() != want {
+			t.Fatalf("unexpected description: %q", component.GetDescription())
+		}
+	})
+}
+
 func TestBuildSubjectTemplates(t *testing.T) {
 	templates := buildSubjectTemplates([]string{"pods", "nodes"})
 	if len(templates) != 2 {
@@ -642,8 +659,13 @@ func TestBuildSubjectTemplates(t *testing.T) {
 	if len(keys) != len(wantKeys) {
 		t.Fatalf("expected identity keys %v, got %v", wantKeys, keys)
 	}
+	for i := range wantKeys {
+		if keys[i] != wantKeys[i] {
+			t.Fatalf("expected pod identity keys %v, got %v", wantKeys, keys)
+		}
+	}
 	nodeKeys := byName["k8s-nodes"].GetIdentityLabelKeys()
-	wantNodeKeys := []string{"cluster_name", "app_name", "name"}
+	wantNodeKeys := []string{"cluster_name", "namespace", "app_name", "name"}
 	if len(nodeKeys) != len(wantNodeKeys) {
 		t.Fatalf("expected node identity keys %v, got %v", wantNodeKeys, nodeKeys)
 	}
@@ -651,6 +673,12 @@ func TestBuildSubjectTemplates(t *testing.T) {
 		if nodeKeys[i] != wantNodeKeys[i] {
 			t.Fatalf("expected node identity keys %v, got %v", wantNodeKeys, nodeKeys)
 		}
+	}
+	if byName["k8s-nodes"].GetTitleTemplate() != "Kubernetes nodes {{ if .namespace }}{{ .namespace }}/{{ end }}{{ .name }} in {{ .cluster_name }}" {
+		t.Fatalf("unexpected node title template: %q", byName["k8s-nodes"].GetTitleTemplate())
+	}
+	if byName["k8s-nodes"].GetDescriptionTemplate() != "Kubernetes nodes {{ .name }} in cluster {{ .cluster_name }}{{ if .namespace }} under namespace {{ .namespace }}{{ end }}" {
+		t.Fatalf("unexpected node description template: %q", byName["k8s-nodes"].GetDescriptionTemplate())
 	}
 }
 
