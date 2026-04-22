@@ -14,13 +14,23 @@ import (
 var reservedInputKeys = map[string]bool{
 	"schema_version": true,
 	"source":         true,
-	"clusters":       true,
+	"main":           true,
+	"context":        true,
+}
+
+// defaultIdentityLabels is the fallback identity-label config used when the
+// user does not supply one. app_name tries the standard Kubernetes recommended
+// label first, then the legacy `app` label.
+var defaultIdentityLabels = map[string][]string{
+	"app_name": {"app.kubernetes.io/name", "app"},
 }
 
 // PluginConfig receives string-only config from the agent gRPC interface.
 type PluginConfig struct {
 	Clusters         string `mapstructure:"clusters"`
 	Resources        string `mapstructure:"resources"`
+	MainResources    string `mapstructure:"main_resources"`
+	IdentityLabels   string `mapstructure:"identity_labels"`
 	NamespaceInclude string `mapstructure:"namespace_include"`
 	NamespaceExclude string `mapstructure:"namespace_exclude"`
 	PolicyLabels     string `mapstructure:"policy_labels"`
@@ -31,6 +41,8 @@ type PluginConfig struct {
 type ParsedConfig struct {
 	Clusters         []auth.ClusterConfig
 	Resources        []string
+	MainResources    []string
+	IdentityLabels   map[string][]string
 	NamespaceInclude []string
 	NamespaceExclude []string
 	PolicyLabels     map[string]string
@@ -82,9 +94,57 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	if len(resources) == 0 {
 		return nil, errors.New("resources must not be empty")
 	}
+	resourceSet := make(map[string]bool, len(resources))
 	for i, r := range resources {
 		if strings.TrimSpace(r) == "" {
 			return nil, fmt.Errorf("resource at index %d is empty", i)
+		}
+		resourceSet[strings.ToLower(r)] = true
+	}
+
+	// --- main_resources (optional; defaults to all resources) ---
+	var mainResources []string
+	if strings.TrimSpace(c.MainResources) != "" {
+		if err := json.Unmarshal([]byte(c.MainResources), &mainResources); err != nil {
+			return nil, fmt.Errorf("could not parse main_resources: %w", err)
+		}
+		for i, r := range mainResources {
+			if strings.TrimSpace(r) == "" {
+				return nil, fmt.Errorf("main_resources at index %d is empty", i)
+			}
+			if !resourceSet[strings.ToLower(r)] {
+				return nil, fmt.Errorf("main_resources entry %q is not present in resources", r)
+			}
+		}
+	}
+	if len(mainResources) == 0 {
+		mainResources = append([]string(nil), resources...)
+	}
+
+	// --- identity_labels (optional; defaults to defaultIdentityLabels) ---
+	identityLabels := map[string][]string{}
+	if strings.TrimSpace(c.IdentityLabels) != "" {
+		if err := json.Unmarshal([]byte(c.IdentityLabels), &identityLabels); err != nil {
+			return nil, fmt.Errorf("could not parse identity_labels: %w", err)
+		}
+		for key, candidates := range identityLabels {
+			if strings.TrimSpace(key) == "" {
+				return nil, errors.New("identity_labels contains an empty key")
+			}
+			if len(candidates) == 0 {
+				return nil, fmt.Errorf("identity_labels key %q must have at least one candidate label", key)
+			}
+			for i, candidate := range candidates {
+				if strings.TrimSpace(candidate) == "" {
+					return nil, fmt.Errorf("identity_labels key %q has empty candidate at index %d", key, i)
+				}
+			}
+		}
+	}
+	if len(identityLabels) == 0 {
+		identityLabels = make(map[string][]string, len(defaultIdentityLabels))
+		for k, v := range defaultIdentityLabels {
+			identityLabels[k] = append([]string(nil), v...)
 		}
 	}
 
@@ -128,6 +188,8 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	return &ParsedConfig{
 		Clusters:         clusters,
 		Resources:        resources,
+		MainResources:    mainResources,
+		IdentityLabels:   identityLabels,
 		NamespaceInclude: nsInclude,
 		NamespaceExclude: nsExclude,
 		PolicyLabels:     policyLabels,

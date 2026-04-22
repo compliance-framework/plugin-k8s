@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	schemaVersionV1 = "v1"
+	schemaVersionV2 = "v2"
 	sourcePluginK8s = "plugin-kubernetes"
 )
 
@@ -56,7 +56,6 @@ func (e *DefaultPolicyEvaluator) Generate(
 	activities []*proto.Activity,
 	data interface{},
 ) ([]*proto.Evidence, error) {
-	e.Logger.Debug("Evaluating OPA policy", "policy_path", policyPath)
 	processor := policyManager.NewPolicyProcessor(
 		e.Logger,
 		labels,
@@ -66,7 +65,6 @@ func (e *DefaultPolicyEvaluator) Generate(
 		actors,
 		activities,
 	)
-	e.Logger.Debug("policy data", "type", fmt.Sprintf("%T", data), "data", data)
 	return processor.GenerateResults(ctx, policyPath, data)
 }
 
@@ -116,8 +114,23 @@ func (p *Plugin) Configure(req *proto.ConfigureRequest) (*proto.ConfigureRespons
 	p.Logger.Info("Kubernetes Plugin configured",
 		"clusters", len(parsed.Clusters),
 		"resources", parsed.Resources,
+		"main_resources", parsed.MainResources,
 	)
 	return &proto.ConfigureResponse{}, nil
+}
+
+// Init registers one SubjectTemplate per configured main resource type and
+// extracts RiskTemplates from the supplied policy bundles.
+func (p *Plugin) Init(req *proto.InitRequest, apiHelper runner.ApiHelper) (*proto.InitResponse, error) {
+	ctx := context.Background()
+	if p.parsedConfig == nil {
+		return nil, errors.New("plugin not configured")
+	}
+
+	templates := buildSubjectTemplates(p.parsedConfig.MainResources)
+	p.Logger.Debug("Init: registering subject templates", "count", len(templates))
+
+	return runner.InitWithSubjectsAndRisksFromPolicies(ctx, p.Logger, req, apiHelper, templates)
 }
 
 func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*proto.EvalResponse, error) {
@@ -130,7 +143,6 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 		return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, errors.New("no policy paths provided")
 	}
 
-	// Collect resources from all clusters concurrently.
 	clusterData, err := CollectAll(
 		ctx,
 		p.collector,
@@ -144,19 +156,330 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 		return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, err
 	}
 
-	// Build the Rego input document.
-	regoInput := buildRegoInput(clusterData, p.parsedConfig.PolicyInput)
-
-	// Build evidence metadata.
-	labels := map[string]string{}
-	maps.Copy(labels, p.parsedConfig.PolicyLabels)
-	labels["source"] = sourcePluginK8s
-	labels["tool"] = sourcePluginK8s
-	if _, exists := labels["provider"]; !exists {
-		labels["provider"] = inferProvider(p.parsedConfig.Clusters)
+	clusterByName := map[string]auth.ClusterConfig{}
+	for _, cl := range p.parsedConfig.Clusters {
+		clusterByName[cl.Name] = cl
 	}
 
-	actors := []*proto.OriginActor{
+	basePolicyLabels := map[string]string{}
+	maps.Copy(basePolicyLabels, p.parsedConfig.PolicyLabels)
+	basePolicyLabels["source"] = sourcePluginK8s
+	basePolicyLabels["tool"] = sourcePluginK8s
+	if _, exists := basePolicyLabels["provider"]; !exists {
+		basePolicyLabels["provider"] = inferProvider(p.parsedConfig.Clusters)
+	}
+
+	actors := defaultActors()
+	activities := defaultActivities()
+
+	mainResourceSet := make(map[string]bool, len(p.parsedConfig.MainResources))
+	for _, r := range p.parsedConfig.MainResources {
+		mainResourceSet[strings.ToLower(r)] = true
+	}
+
+	totalEvaluatorCalls := 0
+	successfulPolicyCalls := 0
+	var accumulatedErrors error
+
+	for clusterName, cluster := range clusterData {
+		cfg, ok := clusterByName[clusterName]
+		if !ok {
+			cfg = auth.ClusterConfig{Name: clusterName, Region: cluster.Region}
+		}
+
+		clusterComponent := buildClusterComponent(cfg)
+		clusterInventory := buildClusterInventory(cfg)
+		clusterContext := buildClusterContext(cfg, cluster)
+
+		clusterEvidences := make([]*proto.Evidence, 0)
+
+		for _, resourceType := range p.parsedConfig.MainResources {
+			items, hasItems := cluster.Resources[resourceType]
+			if !hasItems {
+				p.Logger.Debug("Eval: no items collected for main_resource", "cluster", clusterName, "resource_type", resourceType)
+				continue
+			}
+
+			for _, item := range items {
+				instance := newResourceInstance(cfg, resourceType, item, p.parsedConfig.IdentityLabels)
+
+				labels := buildInstanceLabels(basePolicyLabels, instance)
+				subjects := buildInstanceSubjects(instance, clusterComponent)
+				inventoryItems := append([]*proto.InventoryItem{buildInstanceInventory(instance)}, clusterInventory...)
+				components := []*proto.Component{clusterComponent}
+
+				regoInput := buildRegoInput(item, clusterContext, p.parsedConfig.PolicyInput)
+
+				for _, policyPath := range req.GetPolicyPaths() {
+					totalEvaluatorCalls++
+					evidences, evalErr := p.evaluator.Generate(
+						ctx,
+						policyPath,
+						labels,
+						subjects,
+						components,
+						inventoryItems,
+						actors,
+						activities,
+						regoInput,
+					)
+					clusterEvidences = append(clusterEvidences, evidences...)
+					if evalErr != nil {
+						p.Logger.Warn("Policy evaluation failed", "policy_path", policyPath, "resource", instance.Name, "namespace", instance.Namespace, "cluster", clusterName, "error", evalErr)
+						accumulatedErrors = errors.Join(accumulatedErrors, fmt.Errorf("policy %s [%s/%s/%s]: %w", policyPath, clusterName, instance.Namespace, instance.Name, evalErr))
+						continue
+					}
+					successfulPolicyCalls++
+				}
+			}
+		}
+
+		if len(clusterEvidences) > 0 {
+			if sendErr := apiHelper.CreateEvidence(ctx, clusterEvidences); sendErr != nil {
+				p.Logger.Error("Error creating evidence", "cluster", clusterName, "error", sendErr)
+				return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
+			}
+		}
+	}
+
+	if totalEvaluatorCalls > 0 && successfulPolicyCalls == 0 {
+		if accumulatedErrors == nil {
+			accumulatedErrors = errors.New("policy evaluation failed for all paths")
+		}
+		return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, accumulatedErrors
+	}
+
+	return &proto.EvalResponse{Status: proto.ExecutionStatus_SUCCESS}, nil
+}
+
+// resourceInstance is the per-resource state used to build labels, subjects and inventory.
+type resourceInstance struct {
+	ClusterName    string
+	ResourceType   string
+	Namespace      string // empty for cluster-scoped
+	Name           string
+	IdentityLabels map[string]string // derived from metadata.labels via config
+}
+
+func newResourceInstance(cluster auth.ClusterConfig, resourceType string, resource map[string]interface{}, identityCfg map[string][]string) *resourceInstance {
+	namespace, name := extractResourceIdentity(resource)
+	return &resourceInstance{
+		ClusterName:    cluster.Name,
+		ResourceType:   resourceType,
+		Namespace:      namespace,
+		Name:           name,
+		IdentityLabels: resolveIdentityLabels(resource, identityCfg),
+	}
+}
+
+// extractResourceIdentity reads metadata.name and metadata.namespace from an unstructured resource.
+func extractResourceIdentity(resource map[string]interface{}) (namespace, name string) {
+	meta, ok := resource["metadata"].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+	if n, ok := meta["name"].(string); ok {
+		name = n
+	}
+	if ns, ok := meta["namespace"].(string); ok {
+		namespace = ns
+	}
+	return namespace, name
+}
+
+// resolveIdentityLabels resolves each configured identity key by walking the
+// candidate list against metadata.labels on the resource; falls back to
+// metadata.name when none match so the key is never empty.
+func resolveIdentityLabels(resource map[string]interface{}, config map[string][]string) map[string]string {
+	resolved := make(map[string]string, len(config))
+	var resourceName string
+	var metaLabels map[string]interface{}
+
+	if meta, ok := resource["metadata"].(map[string]interface{}); ok {
+		if n, ok := meta["name"].(string); ok {
+			resourceName = n
+		}
+		if lbls, ok := meta["labels"].(map[string]interface{}); ok {
+			metaLabels = lbls
+		}
+	}
+
+	for key, candidates := range config {
+		value := ""
+		for _, candidate := range candidates {
+			if metaLabels == nil {
+				break
+			}
+			if v, ok := metaLabels[candidate].(string); ok && v != "" {
+				value = v
+				break
+			}
+		}
+		if value == "" {
+			value = resourceName
+		}
+		resolved[key] = value
+	}
+	return resolved
+}
+
+// buildInstanceLabels merges base policy labels with per-instance identity labels.
+func buildInstanceLabels(base map[string]string, instance *resourceInstance) map[string]string {
+	labels := make(map[string]string, len(base)+len(instance.IdentityLabels)+4)
+	maps.Copy(labels, base)
+	labels["cluster_name"] = instance.ClusterName
+	labels["resource_type"] = instance.ResourceType
+	labels["name"] = instance.Name
+	if instance.Namespace != "" {
+		labels["namespace"] = instance.Namespace
+	}
+	// Identity labels (e.g. app_name) may override nothing — but a user-provided
+	// policy_labels entry for the same key stays authoritative. Merge them LAST
+	// only when not already set.
+	for k, v := range instance.IdentityLabels {
+		if _, exists := labels[k]; !exists {
+			labels[k] = v
+		}
+	}
+	return labels
+}
+
+// resourceInstanceIdentifier composes the stable subject identifier for a single resource.
+func resourceInstanceIdentifier(instance *resourceInstance) string {
+	parts := []string{
+		"k8s-" + sanitizeIdentifier(instance.ResourceType),
+		sanitizeIdentifier(instance.ClusterName),
+	}
+	if instance.Namespace != "" {
+		parts = append(parts, sanitizeIdentifier(instance.Namespace))
+	}
+	parts = append(parts, sanitizeIdentifier(instance.Name))
+	return strings.Join(parts, "/")
+}
+
+func buildInstanceSubjects(instance *resourceInstance, clusterComponent *proto.Component) []*proto.Subject {
+	return []*proto.Subject{
+		{
+			Type:       proto.SubjectType_SUBJECT_TYPE_INVENTORY_ITEM,
+			Identifier: resourceInstanceIdentifier(instance),
+		},
+		{
+			Type:       proto.SubjectType_SUBJECT_TYPE_COMPONENT,
+			Identifier: clusterComponent.GetIdentifier(),
+		},
+	}
+}
+
+func buildInstanceInventory(instance *resourceInstance) *proto.InventoryItem {
+	props := []*proto.Property{
+		{Name: "cluster_name", Value: instance.ClusterName},
+		{Name: "resource_type", Value: instance.ResourceType},
+		{Name: "name", Value: instance.Name},
+	}
+	if instance.Namespace != "" {
+		props = append(props, &proto.Property{Name: "namespace", Value: instance.Namespace})
+	}
+	for k, v := range instance.IdentityLabels {
+		props = append(props, &proto.Property{Name: k, Value: v})
+	}
+
+	title := fmt.Sprintf("Kubernetes %s %s", instance.ResourceType, instance.Name)
+	if instance.Namespace != "" {
+		title = fmt.Sprintf("Kubernetes %s %s/%s", instance.ResourceType, instance.Namespace, instance.Name)
+	}
+
+	return &proto.InventoryItem{
+		Identifier: resourceInstanceIdentifier(instance),
+		Type:       "k8s-" + strings.ToLower(instance.ResourceType),
+		Title:      title,
+		Props:      props,
+	}
+}
+
+func buildClusterComponent(cluster auth.ClusterConfig) *proto.Component {
+	clusterID := fmt.Sprintf("k8s-cluster/%s", sanitizeIdentifier(cluster.Name))
+	return &proto.Component{
+		Identifier:  clusterID,
+		Type:        "service",
+		Title:       fmt.Sprintf("Kubernetes Cluster: %s", cluster.Name),
+		Description: fmt.Sprintf("Kubernetes cluster %q in region %s", cluster.ClusterName, cluster.Region),
+		Purpose:     "Kubernetes cluster providing resource data for compliance evaluation.",
+	}
+}
+
+func buildClusterInventory(cluster auth.ClusterConfig) []*proto.InventoryItem {
+	clusterID := fmt.Sprintf("k8s-cluster/%s", sanitizeIdentifier(cluster.Name))
+	return []*proto.InventoryItem{
+		{
+			Identifier: clusterID,
+			Type:       "k8s-cluster",
+			Title:      fmt.Sprintf("Kubernetes Cluster %s", cluster.Name),
+			ImplementedComponents: []*proto.InventoryItemImplementedComponent{
+				{Identifier: clusterID},
+			},
+		},
+	}
+}
+
+// buildClusterContext assembles the cluster metadata + raw resource snapshot
+// exposed to policies as input.context.
+func buildClusterContext(cluster auth.ClusterConfig, data *ClusterResources) map[string]interface{} {
+	return map[string]interface{}{
+		"cluster": map[string]interface{}{
+			"name":     cluster.Name,
+			"region":   cluster.Region,
+			"provider": cluster.EffectiveProvider(),
+		},
+		"resources": data.Resources,
+	}
+}
+
+// buildRegoInput shapes the per-resource Rego input document.
+func buildRegoInput(main map[string]interface{}, clusterContext map[string]interface{}, policyInput map[string]interface{}) map[string]interface{} {
+	input := map[string]interface{}{
+		"schema_version": schemaVersionV2,
+		"source":         sourcePluginK8s,
+		"main":           main,
+		"context":        clusterContext,
+	}
+	for k, v := range policyInput {
+		input[k] = v
+	}
+	return input
+}
+
+// buildSubjectTemplates produces one SubjectTemplate per main resource type.
+// Namespaced types include namespace and app_name in identity; cluster-scoped
+// types (best-effort by name) omit namespace. The agent treats the union of
+// IdentityLabelKeys as the unique key.
+func buildSubjectTemplates(mainResources []string) []*proto.SubjectTemplate {
+	templates := make([]*proto.SubjectTemplate, 0, len(mainResources))
+	for _, resourceType := range mainResources {
+		templateName := "k8s-" + strings.ToLower(resourceType)
+		identityKeys := []string{"cluster_name", "namespace", "app_name", "name"}
+		labelSchema := []*proto.SubjectLabelSchema{
+			{Key: "cluster_name", Description: "Name of the Kubernetes cluster this resource belongs to"},
+			{Key: "namespace", Description: "Namespace of the resource (empty for cluster-scoped resources)"},
+			{Key: "app_name", Description: "Application name resolved from metadata.labels via identity_labels config, falling back to metadata.name"},
+			{Key: "name", Description: "Value of metadata.name on the Kubernetes resource"},
+			{Key: "resource_type", Description: "Kubernetes resource type (e.g. pods, nodes, deployments)"},
+		}
+
+		templates = append(templates, &proto.SubjectTemplate{
+			Name:                templateName,
+			Type:                proto.SubjectType_SUBJECT_TYPE_INVENTORY_ITEM,
+			TitleTemplate:       fmt.Sprintf("Kubernetes %s {{ .namespace }}/{{ .name }} in {{ .cluster_name }}", resourceType),
+			DescriptionTemplate: fmt.Sprintf("Kubernetes %s %s in cluster {{ .cluster_name }} under namespace {{ .namespace }}", resourceType, "{{ .name }}"),
+			PurposeTemplate:     fmt.Sprintf("Individual Kubernetes %s instance evaluated by the Kubernetes plugin.", resourceType),
+			IdentityLabelKeys:   identityKeys,
+			LabelSchema:         labelSchema,
+		})
+	}
+	return templates
+}
+
+func defaultActors() []*proto.OriginActor {
+	return []*proto.OriginActor{
 		{
 			Title: "The Continuous Compliance Framework",
 			Type:  "assessment-platform",
@@ -180,35 +503,10 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 			},
 		},
 	}
+}
 
-	var clusterComponents []*proto.Component
-	var clusterInventory []*proto.InventoryItem
-	var subjects []*proto.Subject
-
-	for _, cl := range p.parsedConfig.Clusters {
-		clusterID := fmt.Sprintf("k8s-cluster/%s", sanitizeIdentifier(cl.Name))
-		clusterComponents = append(clusterComponents, &proto.Component{
-			Identifier:  clusterID,
-			Type:        "service",
-			Title:       fmt.Sprintf("Kubernetes Cluster: %s", cl.Name),
-			Description: fmt.Sprintf("Kubernetes cluster %q in region %s", cl.ClusterName, cl.Region),
-			Purpose:     "Kubernetes cluster providing resource data for compliance evaluation.",
-		})
-		clusterInventory = append(clusterInventory, &proto.InventoryItem{
-			Identifier: clusterID,
-			Type:       "k8s-cluster",
-			Title:      fmt.Sprintf("Kubernetes Cluster %s", cl.Name),
-			ImplementedComponents: []*proto.InventoryItemImplementedComponent{
-				{Identifier: clusterID},
-			},
-		})
-		subjects = append(subjects, &proto.Subject{
-			Type:       proto.SubjectType_SUBJECT_TYPE_COMPONENT,
-			Identifier: clusterID,
-		})
-	}
-
-	activities := []*proto.Activity{
+func defaultActivities() []*proto.Activity {
+	return []*proto.Activity{
 		{
 			Title: "Collect Kubernetes Cluster Resources",
 			Steps: []*proto.Step{
@@ -220,67 +518,11 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 		{
 			Title: "Evaluate OPA Policy Bundles",
 			Steps: []*proto.Step{
-				{Title: "Build Rego Input", Description: "Combine cluster data with user-provided policy input."},
-				{Title: "Evaluate Policies", Description: "Run policy bundles against the combined Rego input document."},
+				{Title: "Build Rego Input", Description: "Shape per-resource Rego input with main + cluster context."},
+				{Title: "Evaluate Policies", Description: "Run policy bundles against each main resource instance."},
 			},
 		},
 	}
-
-	// Evaluate each policy path.
-	allEvidences := make([]*proto.Evidence, 0)
-	var accumulatedErrors error
-	successfulRuns := 0
-
-	for _, policyPath := range req.GetPolicyPaths() {
-		evidences, evalErr := p.evaluator.Generate(
-			ctx,
-			policyPath,
-			labels,
-			subjects,
-			clusterComponents,
-			clusterInventory,
-			actors,
-			activities,
-			regoInput,
-		)
-		allEvidences = append(allEvidences, evidences...)
-		if evalErr != nil {
-			p.Logger.Warn("Policy evaluation failed", "policy_path", policyPath, "error", evalErr)
-			accumulatedErrors = errors.Join(accumulatedErrors, fmt.Errorf("policy %s: %w", policyPath, evalErr))
-			continue
-		}
-		successfulRuns++
-	}
-
-	if len(allEvidences) > 0 {
-		if err := apiHelper.CreateEvidence(ctx, allEvidences); err != nil {
-			p.Logger.Error("Error creating evidence", "error", err)
-			return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, err
-		}
-	}
-
-	if successfulRuns == 0 && len(allEvidences) == 0 {
-		if accumulatedErrors == nil {
-			accumulatedErrors = errors.New("policy evaluation failed for all paths")
-		}
-		return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, accumulatedErrors
-	}
-
-	return &proto.EvalResponse{Status: proto.ExecutionStatus_SUCCESS}, nil
-}
-
-// buildRegoInput constructs the Rego input document from cluster data and user-provided policy input.
-func buildRegoInput(clusters map[string]*ClusterResources, policyInput map[string]interface{}) map[string]interface{} {
-	input := map[string]interface{}{
-		"schema_version": schemaVersionV1,
-		"source":         sourcePluginK8s,
-		"clusters":       clusters,
-	}
-	// Merge user-provided policy_input keys (reserved keys are already rejected at config time).
-	for k, v := range policyInput {
-		input[k] = v
-	}
-	return input
 }
 
 // inferProvider returns the provider label based on cluster configs.
@@ -352,7 +594,7 @@ func main() {
 	goplugin.Serve(&goplugin.ServeConfig{
 		HandshakeConfig: runner.HandshakeConfig,
 		Plugins: map[string]goplugin.Plugin{
-			"runner": &runner.RunnerGRPCPlugin{Impl: plugin},
+			"runner": &runner.RunnerV2GRPCPlugin{Impl: plugin},
 		},
 		GRPCServer: goplugin.DefaultGRPCServer,
 	})

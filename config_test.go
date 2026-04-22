@@ -27,6 +27,12 @@ func TestPluginConfigParse(t *testing.T) {
 		if len(parsed.Resources) != 1 || parsed.Resources[0] != "nodes" {
 			t.Fatalf("unexpected resources: %v", parsed.Resources)
 		}
+		if len(parsed.MainResources) != 1 || parsed.MainResources[0] != "nodes" {
+			t.Fatalf("expected main_resources to default to resources, got %v", parsed.MainResources)
+		}
+		if got := parsed.IdentityLabels["app_name"]; len(got) == 0 || got[0] != "app.kubernetes.io/name" {
+			t.Fatalf("expected default identity_labels, got %v", parsed.IdentityLabels)
+		}
 		if len(parsed.PolicyLabels) != 0 {
 			t.Fatalf("expected empty policy labels")
 		}
@@ -180,7 +186,7 @@ func TestPluginConfigParse(t *testing.T) {
 	})
 
 	t.Run("reserved key in policy_input rejected", func(t *testing.T) {
-		for _, key := range []string{"schema_version", "source", "clusters"} {
+		for _, key := range []string{"schema_version", "source", "main", "context"} {
 			_, err := (&PluginConfig{
 				Clusters:  validClusters,
 				Resources: validResources,
@@ -245,6 +251,60 @@ func TestPluginConfigParse(t *testing.T) {
 		}).Parse()
 		if err == nil || !strings.Contains(err.Error(), "unsupported provider") {
 			t.Fatalf("expected unsupported provider error, got: %v", err)
+		}
+	})
+
+	t.Run("main_resources subset defaults to resources", func(t *testing.T) {
+		cfg := &PluginConfig{Clusters: validClusters, Resources: `["nodes","pods"]`}
+		parsed, err := cfg.Parse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(parsed.MainResources) != 2 {
+			t.Fatalf("expected main_resources to default to resources")
+		}
+	})
+
+	t.Run("main_resources subset honored", func(t *testing.T) {
+		cfg := &PluginConfig{Clusters: validClusters, Resources: `["nodes","pods"]`, MainResources: `["pods"]`}
+		parsed, err := cfg.Parse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(parsed.MainResources) != 1 || parsed.MainResources[0] != "pods" {
+			t.Fatalf("expected MainResources=[pods], got %v", parsed.MainResources)
+		}
+	})
+
+	t.Run("main_resources entry not in resources rejected", func(t *testing.T) {
+		_, err := (&PluginConfig{Clusters: validClusters, Resources: `["pods"]`, MainResources: `["nodes"]`}).Parse()
+		if err == nil || !strings.Contains(err.Error(), "not present in resources") {
+			t.Fatalf("expected not-present error, got: %v", err)
+		}
+	})
+
+	t.Run("identity_labels parsed", func(t *testing.T) {
+		cfg := &PluginConfig{
+			Clusters:       validClusters,
+			Resources:      validResources,
+			IdentityLabels: `{"app_name":["custom-label"],"env":["environment"]}`,
+		}
+		parsed, err := cfg.Parse()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := parsed.IdentityLabels["app_name"]; len(got) != 1 || got[0] != "custom-label" {
+			t.Fatalf("expected app_name=[custom-label], got %v", got)
+		}
+		if _, ok := parsed.IdentityLabels["env"]; !ok {
+			t.Fatalf("expected env identity key")
+		}
+	})
+
+	t.Run("identity_labels with empty candidate list rejected", func(t *testing.T) {
+		_, err := (&PluginConfig{Clusters: validClusters, Resources: validResources, IdentityLabels: `{"app_name":[]}`}).Parse()
+		if err == nil || !strings.Contains(err.Error(), "at least one candidate") {
+			t.Fatalf("expected at-least-one-candidate error, got: %v", err)
 		}
 	})
 
