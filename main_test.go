@@ -22,8 +22,9 @@ type evalCapture struct {
 }
 
 type fakePolicyEvaluator struct {
-	calls     []evalCapture
-	failPaths map[string]bool
+	calls                 []evalCapture
+	failPaths             map[string]bool
+	failPathsWithEvidence map[string]bool
 }
 
 func (f *fakePolicyEvaluator) Generate(
@@ -51,6 +52,9 @@ func (f *fakePolicyEvaluator) Generate(
 
 	if f.failPaths != nil && f.failPaths[policyPath] {
 		return nil, errors.New("forced evaluator error")
+	}
+	if f.failPathsWithEvidence != nil && f.failPathsWithEvidence[policyPath] {
+		return []*proto.Evidence{{UUID: fmt.Sprintf("ev-%s-%d", policyPath, len(f.calls)), Labels: copiedLabels}}, errors.New("forced evaluator error")
 	}
 	return []*proto.Evidence{{UUID: fmt.Sprintf("ev-%s-%d", policyPath, len(f.calls)), Labels: copiedLabels}}, nil
 }
@@ -308,6 +312,45 @@ func TestEvalLoopBehavior(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "prod//") {
 			t.Fatalf("expected cluster-scoped resource location without empty namespace, got: %v", err)
+		}
+	})
+
+	t.Run("does not publish evidence returned alongside evaluator errors", func(t *testing.T) {
+		collector := &fakeCollector{
+			results: map[string]*ClusterResources{
+				"prod": {
+					Name: "prod", Region: "us-east-1",
+					Resources: map[string][]map[string]interface{}{"pods": {newPodItem("p1", "app", "api")}},
+				},
+			},
+		}
+		evaluator := &fakePolicyEvaluator{failPathsWithEvidence: map[string]bool{"bundle-a": true}}
+		apiHelper := &fakeAPIHelper{}
+
+		plugin := &Plugin{
+			Logger: hclog.NewNullLogger(),
+			parsedConfig: &ParsedConfig{
+				Clusters:       []auth.ClusterConfig{{Name: "prod", Region: "us-east-1", ClusterName: "prod-eks"}},
+				Resources:      []string{"pods"},
+				MainResources:  []string{"pods"},
+				IdentityLabels: defaultIdentityLabels,
+			},
+			collector: collector,
+			evaluator: evaluator,
+		}
+
+		resp, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper)
+		if err == nil {
+			t.Fatalf("expected eval failure")
+		}
+		if resp.GetStatus() != proto.ExecutionStatus_FAILURE {
+			t.Fatalf("expected failure status")
+		}
+		if apiHelper.createCalls != 0 {
+			t.Fatalf("expected no CreateEvidence calls, got %d", apiHelper.createCalls)
+		}
+		if len(apiHelper.evidence) != 0 {
+			t.Fatalf("expected no published evidence, got %d", len(apiHelper.evidence))
 		}
 	})
 

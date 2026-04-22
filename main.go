@@ -231,13 +231,6 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 						activities,
 						regoInput,
 					)
-					clusterEvidences = append(clusterEvidences, evidences...)
-					if len(clusterEvidences) >= evidenceBatchSize {
-						if sendErr := flushEvidences(clusterName, clusterEvidences); sendErr != nil {
-							return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
-						}
-						clusterEvidences = clusterEvidences[:0]
-					}
 					if evalErr != nil {
 						p.Logger.Warn("Policy evaluation failed", "policy_path", policyPath, "resource", instance.Name, "namespace", instance.Namespace, "cluster", clusterName, "error", evalErr)
 						resourceLocation := fmt.Sprintf("%s/%s", clusterName, instance.Name)
@@ -246,6 +239,13 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 						}
 						accumulatedErrors = errors.Join(accumulatedErrors, fmt.Errorf("policy %s [%s]: %w", policyPath, resourceLocation, evalErr))
 						continue
+					}
+					clusterEvidences = append(clusterEvidences, evidences...)
+					if len(clusterEvidences) >= evidenceBatchSize {
+						if sendErr := flushEvidences(clusterName, clusterEvidences); sendErr != nil {
+							return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
+						}
+						clusterEvidences = clusterEvidences[:0]
 					}
 					successfulPolicyCalls++
 				}
