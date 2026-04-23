@@ -9,18 +9,34 @@ import (
 	"github.com/compliance-framework/plugin-k8s/auth"
 )
 
+func normalizeResourceName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 // reservedInputKeys are top-level keys managed by the plugin that users cannot
 // override via policy_input.
 var reservedInputKeys = map[string]bool{
 	"schema_version": true,
 	"source":         true,
-	"clusters":       true,
+	"main":           true,
+	"subject":        true,
+	"context":        true,
+	"fleet":          true,
+}
+
+// defaultIdentityLabels is the fallback identity-label config used when the
+// user does not supply one. app_name tries the standard Kubernetes recommended
+// label first, then the legacy `app` label.
+var defaultIdentityLabels = map[string][]string{
+	"app_name": {"app.kubernetes.io/name", "app"},
 }
 
 // PluginConfig receives string-only config from the agent gRPC interface.
 type PluginConfig struct {
 	Clusters         string `mapstructure:"clusters"`
 	Resources        string `mapstructure:"resources"`
+	MainResources    string `mapstructure:"main_resources"`
+	IdentityLabels   string `mapstructure:"identity_labels"`
 	NamespaceInclude string `mapstructure:"namespace_include"`
 	NamespaceExclude string `mapstructure:"namespace_exclude"`
 	PolicyLabels     string `mapstructure:"policy_labels"`
@@ -31,6 +47,8 @@ type PluginConfig struct {
 type ParsedConfig struct {
 	Clusters         []auth.ClusterConfig
 	Resources        []string
+	MainResources    []string
+	IdentityLabels   map[string][]string
 	NamespaceInclude []string
 	NamespaceExclude []string
 	PolicyLabels     map[string]string
@@ -82,9 +100,81 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	if len(resources) == 0 {
 		return nil, errors.New("resources must not be empty")
 	}
+	resourceSet := make(map[string]bool, len(resources))
 	for i, r := range resources {
-		if strings.TrimSpace(r) == "" {
+		normalized := normalizeResourceName(r)
+		if normalized == "" {
 			return nil, fmt.Errorf("resource at index %d is empty", i)
+		}
+		if resourceSet[normalized] {
+			return nil, fmt.Errorf("resources contains duplicate entry %q after normalization", normalized)
+		}
+		resources[i] = normalized
+		resourceSet[normalized] = true
+	}
+
+	// --- main_resources (optional; defaults to all resources) ---
+	var mainResources []string
+	if strings.TrimSpace(c.MainResources) != "" {
+		mainResourceSet := map[string]bool{}
+		if err := json.Unmarshal([]byte(c.MainResources), &mainResources); err != nil {
+			return nil, fmt.Errorf("could not parse main_resources: %w", err)
+		}
+		for i, r := range mainResources {
+			normalized := normalizeResourceName(r)
+			if normalized == "" {
+				return nil, fmt.Errorf("main_resources at index %d is empty", i)
+			}
+			if !resourceSet[normalized] {
+				return nil, fmt.Errorf("main_resources entry %q is not present in resources", r)
+			}
+			if mainResourceSet[normalized] {
+				return nil, fmt.Errorf("main_resources contains duplicate entry %q after normalization", normalized)
+			}
+			mainResources[i] = normalized
+			mainResourceSet[normalized] = true
+		}
+	}
+	if len(mainResources) == 0 {
+		mainResources = append([]string(nil), resources...)
+	}
+
+	// --- identity_labels (optional; defaults to defaultIdentityLabels) ---
+	identityLabels := map[string][]string{}
+	if strings.TrimSpace(c.IdentityLabels) != "" {
+		if err := json.Unmarshal([]byte(c.IdentityLabels), &identityLabels); err != nil {
+			return nil, fmt.Errorf("could not parse identity_labels: %w", err)
+		}
+		normalizedIdentityLabels := make(map[string][]string, len(identityLabels))
+		for key, candidates := range identityLabels {
+			trimmedKey := strings.TrimSpace(key)
+			if trimmedKey == "" {
+				return nil, errors.New("identity_labels contains an empty key")
+			}
+			if _, exists := normalizedIdentityLabels[trimmedKey]; exists {
+				return nil, fmt.Errorf("identity_labels contains duplicate key %q after trimming", trimmedKey)
+			}
+			if len(candidates) == 0 {
+				return nil, fmt.Errorf("identity_labels key %q must have at least one candidate label", trimmedKey)
+			}
+			for i, candidate := range candidates {
+				trimmedCandidate := strings.TrimSpace(candidate)
+				if trimmedCandidate == "" {
+					return nil, fmt.Errorf("identity_labels key %q has empty candidate at index %d", trimmedKey, i)
+				}
+				candidates[i] = trimmedCandidate
+			}
+			normalizedIdentityLabels[trimmedKey] = candidates
+		}
+		if _, ok := normalizedIdentityLabels["app_name"]; !ok {
+			return nil, errors.New("identity_labels must include app_name")
+		}
+		identityLabels = normalizedIdentityLabels
+	}
+	if len(identityLabels) == 0 {
+		identityLabels = make(map[string][]string, len(defaultIdentityLabels))
+		for k, v := range defaultIdentityLabels {
+			identityLabels[k] = append([]string(nil), v...)
 		}
 	}
 
@@ -128,6 +218,8 @@ func (c *PluginConfig) Parse() (*ParsedConfig, error) {
 	return &ParsedConfig{
 		Clusters:         clusters,
 		Resources:        resources,
+		MainResources:    mainResources,
+		IdentityLabels:   identityLabels,
 		NamespaceInclude: nsInclude,
 		NamespaceExclude: nsExclude,
 		PolicyLabels:     policyLabels,
