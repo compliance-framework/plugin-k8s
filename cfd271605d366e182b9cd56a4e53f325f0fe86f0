@@ -1,0 +1,6 @@
+lisa-design:
+- Seeded .release-please-manifest.json at 0.2.0: latest final release v0.2.0 (tag vX.Y.Z, ancestor of main). No bootstrap-sha needed.
+- Callers are verbatim copies of mock-plugin-1 (cut-prerelease from mock-plugin-policies-1) with pins moved to workflows v1.5.2 and the (W1-S1) suffix dropped; default branch is main, so push triggers stay [main].
+- release-please-config.json equals workflows release-please/defaults.json at v1.5.2 plus packages {".": go}; no drift.
+- .goreleaser.yaml only gains release {prerelease: auto, replace_existing_artifacts: true}; builds/archives unchanged (repo has no LICENSE, so archives hold README.md + plugin, as v0.2.0's did).
+- ci.yml already pinned v1.5.2 with release-checks; left untouched.
