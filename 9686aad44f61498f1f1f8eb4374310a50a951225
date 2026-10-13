@@ -1,0 +1,2 @@
+lisa-selfreview:
+Pass 1 (ccf-review packs core,go,go-plugin): no findings. ci.yml is mock-plugin-1's caller with the mock comment dropped and all three pins at v1.5.2; nothing else called test.yml. archives.formats change verified with goreleaser release --snapshot before/after: same 5 archive names, same contents (README.md, plugin). Local checks: gofmt, go mod tidy (no diff), go vet, go test -race, golangci-lint v2.11.4 shared config new-from-merge-base (0 issues) and config verify, goreleaser check (clean) and snapshot build, actionlint v1.7.12 (clean).
