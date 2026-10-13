@@ -1,0 +1,2 @@
+lisa-design:
+policy_data is passed through a new policyData parameter on the package-local PolicyEvaluator.Generate (not a field on DefaultPolicyEvaluator), so the value Configure stores is read on every Eval and survives reconfigure, and the fake evaluator in tests can assert it reached every evaluation. auth/auth.go gofmt fix is a separate style commit so gofmt -l . is empty, as the task requires.
