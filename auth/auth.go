@@ -26,7 +26,7 @@ type ClusterConfig struct {
 
 	// Kubeconfig-specific fields (used when provider is "kubeconfig")
 	Kubeconfig string `json:"kubeconfig,omitempty"` // path to kubeconfig file; empty = default
-	Context    string `json:"context,omitempty"`     // kubeconfig context; empty = current-context
+	Context    string `json:"context,omitempty"`    // kubeconfig context; empty = current-context
 }
 
 // EffectiveProvider returns the provider type, defaulting to "eks".
