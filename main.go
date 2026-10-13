@@ -38,6 +38,7 @@ type PolicyEvaluator interface {
 		actors []*proto.OriginActor,
 		activities []*proto.Activity,
 		data interface{},
+		policyData map[string]interface{},
 	) ([]*proto.Evidence, error)
 }
 
@@ -56,6 +57,7 @@ func (e *DefaultPolicyEvaluator) Generate(
 	actors []*proto.OriginActor,
 	activities []*proto.Activity,
 	data interface{},
+	policyData map[string]interface{},
 ) ([]*proto.Evidence, error) {
 	processor := policyManager.NewPolicyProcessor(
 		e.Logger,
@@ -65,6 +67,7 @@ func (e *DefaultPolicyEvaluator) Generate(
 		inventory,
 		actors,
 		activities,
+		policyData,
 	)
 	return processor.GenerateResults(ctx, policyPath, data)
 }
@@ -75,6 +78,8 @@ type Plugin struct {
 
 	config       *PluginConfig
 	parsedConfig *ParsedConfig
+	// policyData is the agent's policy_data for this plugin, exposed to Rego as data.<key>.
+	policyData map[string]interface{}
 
 	collector ClusterCollector
 	evaluator PolicyEvaluator
@@ -97,6 +102,11 @@ func (p *Plugin) Configure(req *proto.ConfigureRequest) (*proto.ConfigureRespons
 
 	p.config = config
 	p.parsedConfig = parsed
+	if policyData := req.GetPolicyData(); policyData != nil {
+		p.policyData = policyData.AsMap()
+	} else {
+		p.policyData = nil
+	}
 
 	if p.collector == nil {
 		p.collector = &DynamicClusterCollector{
@@ -230,6 +240,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 						actors,
 						activities,
 						regoInput,
+						p.policyData,
 					)
 					if evalErr != nil {
 						p.Logger.Warn("Policy evaluation failed", "policy_path", policyPath, "resource", instance.Name, "namespace", instance.Namespace, "cluster", clusterName, "error", evalErr)

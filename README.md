@@ -145,6 +145,21 @@ Any fields from `policy_input` config are merged at the top level. Reserved keys
 | `input.fleet` | object | Plugin | Multi-cluster snapshot keyed by cluster name, each with `{cluster, resources}` |
 | `input.<custom_key>` | any | `policy_input` | User-defined fields |
 
+### Policy data
+
+Any `policy_data` set on this plugin's block in the agent configuration is passed
+to every policy evaluation and is available to Rego as `data.<key>` (unlike
+`policy_input`, which is merged into `input`):
+
+```yaml
+plugins:
+  kubernetes:
+    # ...source, policies and config as usual...
+    policy_data:
+      allowed_registries:
+        - ghcr.io/compliance-framework
+```
+
 ### Example: writing a policy
 
 ```rego
