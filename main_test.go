@@ -11,6 +11,7 @@ import (
 
 	"github.com/compliance-framework/agent/runner/proto"
 	"github.com/hashicorp/go-hclog"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type evalCapture struct {
@@ -19,6 +20,7 @@ type evalCapture struct {
 	subjects   []*proto.Subject
 	inventory  []*proto.InventoryItem
 	data       interface{}
+	policyData map[string]interface{}
 }
 
 type fakePolicyEvaluator struct {
@@ -37,6 +39,7 @@ func (f *fakePolicyEvaluator) Generate(
 	actors []*proto.OriginActor,
 	activities []*proto.Activity,
 	data interface{},
+	policyData map[string]interface{},
 ) ([]*proto.Evidence, error) {
 	copiedLabels := map[string]string{}
 	for k, v := range labels {
@@ -48,6 +51,7 @@ func (f *fakePolicyEvaluator) Generate(
 		subjects:   subjects,
 		inventory:  inventory,
 		data:       data,
+		policyData: policyData,
 	})
 
 	if f.failPaths != nil && f.failPaths[policyPath] {
@@ -454,6 +458,43 @@ func TestEvalLoopBehavior(t *testing.T) {
 		}
 	})
 
+	t.Run("passes policy data to every evaluation", func(t *testing.T) {
+		collector := &fakeCollector{
+			results: map[string]*ClusterResources{
+				"prod": {
+					Name: "prod", Region: "us-east-1",
+					Resources: map[string][]map[string]interface{}{"pods": {newPodItem("p1", "app", "svc")}},
+				},
+			},
+		}
+		evaluator := &fakePolicyEvaluator{}
+		plugin := &Plugin{
+			Logger: hclog.NewNullLogger(),
+			parsedConfig: &ParsedConfig{
+				Clusters:       []auth.ClusterConfig{{Name: "prod", Region: "us-east-1", ClusterName: "prod-eks"}},
+				Resources:      []string{"pods"},
+				MainResources:  []string{"pods"},
+				IdentityLabels: defaultIdentityLabels,
+			},
+			policyData: map[string]interface{}{"allowed_registries": []interface{}{"ghcr.io"}},
+			collector:  collector,
+			evaluator:  evaluator,
+		}
+
+		if _, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a", "bundle-b"}}, &fakeAPIHelper{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(evaluator.calls) != 2 {
+			t.Fatalf("expected 2 evaluator calls, got %d", len(evaluator.calls))
+		}
+		for _, call := range evaluator.calls {
+			registries, ok := call.policyData["allowed_registries"].([]interface{})
+			if !ok || len(registries) != 1 || registries[0] != "ghcr.io" {
+				t.Fatalf("unexpected policy data for %s: %#v", call.policyPath, call.policyData)
+			}
+		}
+	})
+
 	t.Run("skips main resource types with no collected items", func(t *testing.T) {
 		collector := &fakeCollector{
 			results: map[string]*ClusterResources{
@@ -765,6 +806,36 @@ func TestConfigureSuccess(t *testing.T) {
 	}
 	if plugin.parsedConfig.PolicyLabels["team"] != "platform" {
 		t.Fatalf("expected parsed policy label")
+	}
+}
+
+func TestConfigureStoresPolicyData(t *testing.T) {
+	policyData, err := structpb.NewStruct(map[string]interface{}{
+		"allowed_registries": []interface{}{"ghcr.io"},
+	})
+	if err != nil {
+		t.Fatalf("build policy data: %v", err)
+	}
+
+	plugin := &Plugin{Logger: hclog.NewNullLogger()}
+	config := map[string]string{
+		"clusters":  `[{"name":"prod","region":"us-east-1","cluster_name":"my-eks"}]`,
+		"resources": `["nodes"]`,
+	}
+
+	if _, err := plugin.Configure(&proto.ConfigureRequest{Config: config, PolicyData: policyData}); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	registries, ok := plugin.policyData["allowed_registries"].([]interface{})
+	if !ok || len(registries) != 1 || registries[0] != "ghcr.io" {
+		t.Fatalf("unexpected policy data: %#v", plugin.policyData)
+	}
+
+	if _, err := plugin.Configure(&proto.ConfigureRequest{Config: config}); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+	if plugin.policyData != nil {
+		t.Fatalf("expected policy data to be cleared, got %#v", plugin.policyData)
 	}
 }
 
