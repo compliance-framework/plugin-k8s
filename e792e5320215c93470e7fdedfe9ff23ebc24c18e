@@ -1,2 +1,5 @@
 lisa-design:
 policy_data is passed through a new policyData parameter on the package-local PolicyEvaluator.Generate (not a field on DefaultPolicyEvaluator), so the value Configure stores is read on every Eval and survives reconfigure, and the fake evaluator in tests can assert it reached every evaluation. auth/auth.go gofmt fix is a separate style commit so gofmt -l . is empty, as the task requires.
+
+lisa-selfreview:
+Pass 1 (ccf-review packs core,go,go-plugin): no findings. Verified go build, go vet, go test, go test -race, gofmt -l (empty), golangci-lint v2.11.4 with the shared v1.5.2 config (0 issues, also on the full tree), goreleaser check (only deprecated archives.format) and snapshot build.
