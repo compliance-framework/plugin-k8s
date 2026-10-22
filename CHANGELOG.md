@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.1...v0.2.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **deps:** update all non-major dependencies ([#23](https://github.com/compliance-framework/plugin-k8s/issues/23)) ([70ea66f](https://github.com/compliance-framework/plugin-k8s/commit/70ea66f8806e751dc4c849b9bf1470d53bdc8d4c))
+
 ## [0.2.1](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.0...v0.2.1) (2026-10-14)
 
 
