@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.2](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.1...v0.2.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **deps:** bump agent to v0.9.4 ([#27](https://github.com/compliance-framework/plugin-k8s/issues/27)) ([8ab18ba](https://github.com/compliance-framework/plugin-k8s/commit/8ab18ba17de23086934b78843b78a4f820ee94bb))
+* **deps:** update all non-major dependencies ([#23](https://github.com/compliance-framework/plugin-k8s/issues/23)) ([70ea66f](https://github.com/compliance-framework/plugin-k8s/commit/70ea66f8806e751dc4c849b9bf1470d53bdc8d4c))
+* **deps:** update aws-sdk-go-v2 monorepo ([#25](https://github.com/compliance-framework/plugin-k8s/issues/25)) ([9cd69f5](https://github.com/compliance-framework/plugin-k8s/commit/9cd69f5fd371fdbecbe3530fa98057528256b105))
+* **deps:** update kubernetes monorepo to v0.37.1 ([#26](https://github.com/compliance-framework/plugin-k8s/issues/26)) ([fb8b5d7](https://github.com/compliance-framework/plugin-k8s/commit/fb8b5d7f8370db0ac310d406edf63af7b5474489))
+
 ## [0.2.1](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.0...v0.2.1) (2026-10-14)
 
 
