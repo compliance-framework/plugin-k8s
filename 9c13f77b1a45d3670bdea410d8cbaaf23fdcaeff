@@ -1,0 +1,2 @@
+lisa-addressed:
+- ccf-review Nit (Dockerfile:1): builder moved from golang:1.25-alpine to golang:1.26-alpine; ENV GOTOOLCHAIN=auto kept.
