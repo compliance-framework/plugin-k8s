@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.3](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.2...v0.2.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* bound evidence batches by size and release flushed evidence ([#34](https://github.com/compliance-framework/plugin-k8s/issues/34)) ([ba75c80](https://github.com/compliance-framework/plugin-k8s/commit/ba75c80383c63436a07bab3f8351ad49a88f1749))
+* **deps:** build with the go1.26.10 toolchain so Renovate can ship Go security fixes ([#28](https://github.com/compliance-framework/plugin-k8s/issues/28)) ([6c936f4](https://github.com/compliance-framework/plugin-k8s/commit/6c936f4c2407aa4bccfbe9b78a080c9db505cd14))
+* **deps:** update module github.com/aws/smithy-go to v1.28.6 ([#29](https://github.com/compliance-framework/plugin-k8s/issues/29)) ([3fe4828](https://github.com/compliance-framework/plugin-k8s/commit/3fe48288aec38b76484a1c27c6fee80b3f4accb7))
+
 ## [0.2.2](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.1...v0.2.2) (2026-10-28)
 
 
