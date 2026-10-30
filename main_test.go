@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +29,11 @@ type fakePolicyEvaluator struct {
 	calls                 []evalCapture
 	failPaths             map[string]bool
 	failPathsWithEvidence map[string]bool
+	// evaluationBytes, when set, attaches a PolicyEvaluation with this many input bytes,
+	// shared by every evidence from the call, as the agent SDK does.
+	evaluationBytes int
+	// evidencesPerCall defaults to 1.
+	evidencesPerCall int
 }
 
 func (f *fakePolicyEvaluator) Generate(
@@ -60,11 +67,29 @@ func (f *fakePolicyEvaluator) Generate(
 	if f.failPathsWithEvidence != nil && f.failPathsWithEvidence[policyPath] {
 		return []*proto.Evidence{{UUID: fmt.Sprintf("ev-%s-%d", policyPath, len(f.calls)), Labels: copiedLabels}}, errors.New("forced evaluator error")
 	}
-	return []*proto.Evidence{{UUID: fmt.Sprintf("ev-%s-%d", policyPath, len(f.calls)), Labels: copiedLabels}}, nil
+	count := max(f.evidencesPerCall, 1)
+	var evaluation *proto.PolicyEvaluation
+	if f.evaluationBytes > 0 {
+		evaluation = &proto.PolicyEvaluation{PolicyPath: policyPath, Input: make([]byte, f.evaluationBytes)}
+	}
+	evidences := make([]*proto.Evidence, 0, count)
+	for i := range count {
+		evidences = append(evidences, &proto.Evidence{
+			UUID:             fmt.Sprintf("ev-%s-%d-%d", policyPath, len(f.calls), i),
+			Labels:           copiedLabels,
+			PolicyEvaluation: evaluation,
+		})
+	}
+	return evidences, nil
 }
 
 type fakeAPIHelper struct {
-	createCalls      int
+	createCalls int
+	batchSizes  []int
+	// heldAfterFlush records, at each flush, how many evidences from earlier flushes are
+	// still reachable from the slice Eval passes in, including beyond its length.
+	heldAfterFlush   []int
+	lastBatch        []*proto.Evidence
 	evidence         []*proto.Evidence
 	createErr        error
 	subjectTemplates []*proto.SubjectTemplate
@@ -73,6 +98,21 @@ type fakeAPIHelper struct {
 
 func (f *fakeAPIHelper) CreateEvidence(ctx context.Context, evidence []*proto.Evidence) error {
 	f.createCalls++
+	f.batchSizes = append(f.batchSizes, len(evidence))
+	if f.lastBatch != nil {
+		sent := map[*proto.Evidence]bool{}
+		for _, e := range f.lastBatch {
+			sent[e] = true
+		}
+		held := 0
+		for _, e := range evidence[:cap(evidence)] {
+			if e != nil && sent[e] {
+				held++
+			}
+		}
+		f.heldAfterFlush = append(f.heldAfterFlush, held)
+	}
+	f.lastBatch = append([]*proto.Evidence(nil), evidence...)
 	f.evidence = append(f.evidence, evidence...)
 	return f.createErr
 }
@@ -397,6 +437,83 @@ func TestEvalLoopBehavior(t *testing.T) {
 		}
 		if len(apiHelper.evidence) != evidenceBatchSize+5 {
 			t.Fatalf("expected %d evidences, got %d", evidenceBatchSize+5, len(apiHelper.evidence))
+		}
+	})
+
+	newBatchingPlugin := func(pods int, evaluator *fakePolicyEvaluator, maxBytes int) *Plugin {
+		items := make([]map[string]interface{}, 0, pods)
+		for i := range pods {
+			items = append(items, newPodItem(fmt.Sprintf("pod-%d", i), "app", fmt.Sprintf("app-%d", i)))
+		}
+		return &Plugin{
+			Logger: hclog.NewNullLogger(),
+			parsedConfig: &ParsedConfig{
+				Clusters:       []auth.ClusterConfig{{Name: "prod", Region: "us-east-1", ClusterName: "prod-eks"}},
+				Resources:      []string{"pods"},
+				MainResources:  []string{"pods"},
+				IdentityLabels: defaultIdentityLabels,
+			},
+			collector: &fakeCollector{results: map[string]*ClusterResources{
+				"prod": {Name: "prod", Region: "us-east-1", Resources: map[string][]map[string]interface{}{"pods": items}},
+			}},
+			evaluator:             evaluator,
+			evidenceBatchMaxBytes: maxBytes,
+		}
+	}
+
+	t.Run("flushes evidence when batch byte limit is reached", func(t *testing.T) {
+		evaluator := &fakePolicyEvaluator{evaluationBytes: 1000}
+		apiHelper := &fakeAPIHelper{}
+		plugin := newBatchingPlugin(10, evaluator, 3000)
+
+		if _, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper); err != nil {
+			t.Fatalf("unexpected eval error: %v", err)
+		}
+		if want := []int{3, 3, 3, 1}; !slices.Equal(apiHelper.batchSizes, want) {
+			t.Fatalf("expected batch sizes %v, got %v", want, apiHelper.batchSizes)
+		}
+		if len(apiHelper.evidence) != 10 {
+			t.Fatalf("expected 10 evidences, got %d", len(apiHelper.evidence))
+		}
+	})
+
+	t.Run("counts an evaluation shared by several evidences once", func(t *testing.T) {
+		evaluator := &fakePolicyEvaluator{evaluationBytes: 1000, evidencesPerCall: 3}
+		apiHelper := &fakeAPIHelper{}
+		plugin := newBatchingPlugin(4, evaluator, 2000)
+
+		if _, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper); err != nil {
+			t.Fatalf("unexpected eval error: %v", err)
+		}
+		// Two evaluations reach 2000 bytes; counting each evidence would flush after one.
+		if want := []int{6, 6}; !slices.Equal(apiHelper.batchSizes, want) {
+			t.Fatalf("expected batch sizes %v, got %v", want, apiHelper.batchSizes)
+		}
+	})
+
+	t.Run("count limit still applies below the byte limit", func(t *testing.T) {
+		evaluator := &fakePolicyEvaluator{evaluationBytes: 10}
+		apiHelper := &fakeAPIHelper{}
+		plugin := newBatchingPlugin(evidenceBatchSize+5, evaluator, defaultEvidenceBatchMaxBytes)
+
+		if _, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper); err != nil {
+			t.Fatalf("unexpected eval error: %v", err)
+		}
+		if want := []int{evidenceBatchSize, 5}; !slices.Equal(apiHelper.batchSizes, want) {
+			t.Fatalf("expected batch sizes %v, got %v", want, apiHelper.batchSizes)
+		}
+	})
+
+	t.Run("flushed evidence is not kept reachable by the next batch", func(t *testing.T) {
+		evaluator := &fakePolicyEvaluator{}
+		apiHelper := &fakeAPIHelper{}
+		plugin := newBatchingPlugin(evidenceBatchSize+5, evaluator, defaultEvidenceBatchMaxBytes)
+
+		if _, err := plugin.Eval(&proto.EvalRequest{PolicyPaths: []string{"bundle-a"}}, apiHelper); err != nil {
+			t.Fatalf("unexpected eval error: %v", err)
+		}
+		if want := []int{0}; !slices.Equal(apiHelper.heldAfterFlush, want) {
+			t.Fatalf("expected no evidence from the previous flush to remain reachable, got %v", apiHelper.heldAfterFlush)
 		}
 	})
 
@@ -854,5 +971,34 @@ func TestSanitizeIdentifier(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("sanitizeIdentifier(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestEvidenceBatchMaxBytesFromEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  int
+	}{
+		{name: "unset uses default", want: defaultEvidenceBatchMaxBytes},
+		{name: "empty uses default", value: "", set: true, want: defaultEvidenceBatchMaxBytes},
+		{name: "valid value", value: "1048576", set: true, want: 1048576},
+		{name: "not a number uses default", value: "64MiB", set: true, want: defaultEvidenceBatchMaxBytes},
+		{name: "zero uses default", value: "0", set: true, want: defaultEvidenceBatchMaxBytes},
+		{name: "negative uses default", value: "-1", set: true, want: defaultEvidenceBatchMaxBytes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv(evidenceBatchMaxBytesEnv, tt.value)
+			} else {
+				t.Setenv(evidenceBatchMaxBytesEnv, "")
+				os.Unsetenv(evidenceBatchMaxBytesEnv)
+			}
+			if got := evidenceBatchMaxBytesFromEnv(hclog.NewNullLogger()); got != tt.want {
+				t.Fatalf("expected %d, got %d", tt.want, got)
+			}
+		})
 	}
 }
