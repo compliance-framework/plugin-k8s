@@ -46,7 +46,17 @@ During `Init`, the plugin registers one `SubjectTemplate` per entry in `main_res
 
 For cluster-scoped resources such as `nodes`, the emitted evidence labels still include `namespace` with an empty string so label contracts stay stable, but the corresponding `SubjectTemplate` omits `namespace` from its identity keys and rendering.
 
-During `Eval`, every concrete Kubernetes resource instance that matches a `main_resources` type becomes its own subject and receives its own evidence for every configured policy path. Policies are invoked once per `(resource instance, policy path)` pair. Evidence is batched per cluster, but may be sent via multiple `CreateEvidence` calls when the `evidenceBatchSize` threshold is reached.
+During `Eval`, every concrete Kubernetes resource instance that matches a `main_resources` type becomes its own subject and receives its own evidence for every configured policy path. Policies are invoked once per `(resource instance, policy path)` pair. Evidence is batched per cluster, and a batch is sent with `CreateEvidence` when it reaches 100 evidences or when the policy-evaluation data it holds reaches a byte limit, whichever comes first.
+
+Each evidence carries a JSON copy of the Rego input it was evaluated against, and that input includes every collected resource in the fleet (`input.context` and `input.fleet`). With large clusters a single input can be tens of MiB, so the byte limit is what keeps memory bounded.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CCF_K8S_EVIDENCE_BATCH_MAX_BYTES` | `67108864` (64 MiB) | Maximum total size, in bytes, of the policy-evaluation input and policy data held in one evidence batch. Lower it if the plugin runs out of memory. Invalid or non-positive values fall back to the default with a warning. |
+
+The agent passes its environment through to plugin processes, so set this on the agent.
 
 ## Configuration Examples
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/compliance-framework/plugin-k8s/auth"
@@ -24,6 +26,12 @@ const (
 	schemaVersionV2   = "v2"
 	sourcePluginK8s   = "plugin-kubernetes"
 	evidenceBatchSize = 100
+
+	// evidenceBatchMaxBytesEnv caps the policy-evaluation data (input and policy data JSON)
+	// held in one evidence batch. Every evidence carries its own copy of the Rego input,
+	// which includes the whole fleet, so a count-only batch can hold gigabytes.
+	evidenceBatchMaxBytesEnv     = "CCF_K8S_EVIDENCE_BATCH_MAX_BYTES"
+	defaultEvidenceBatchMaxBytes = 64 << 20
 )
 
 // PolicyEvaluator wraps OPA policy execution so eval loop behavior can be tested with mocks.
@@ -83,6 +91,8 @@ type Plugin struct {
 
 	collector ClusterCollector
 	evaluator PolicyEvaluator
+
+	evidenceBatchMaxBytes int
 }
 
 func (p *Plugin) Configure(req *proto.ConfigureRequest) (*proto.ConfigureResponse, error) {
@@ -121,13 +131,30 @@ func (p *Plugin) Configure(req *proto.ConfigureRequest) (*proto.ConfigureRespons
 	if p.evaluator == nil {
 		p.evaluator = &DefaultPolicyEvaluator{Logger: p.Logger.Named("policy-evaluator")}
 	}
+	p.evidenceBatchMaxBytes = evidenceBatchMaxBytesFromEnv(p.Logger)
 
 	p.Logger.Info("Kubernetes Plugin configured",
 		"clusters", len(parsed.Clusters),
 		"resources", parsed.Resources,
 		"main_resources", parsed.MainResources,
+		"evidence_batch_max_bytes", p.evidenceBatchMaxBytes,
 	)
 	return &proto.ConfigureResponse{}, nil
+}
+
+// evidenceBatchMaxBytesFromEnv reads the batch byte limit, falling back to the default
+// when the variable is unset or not a positive integer.
+func evidenceBatchMaxBytesFromEnv(logger hclog.Logger) int {
+	raw, ok := os.LookupEnv(evidenceBatchMaxBytesEnv)
+	if !ok || raw == "" {
+		return defaultEvidenceBatchMaxBytes
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		logger.Warn("Ignoring invalid evidence batch byte limit", "env", evidenceBatchMaxBytesEnv, "value", raw, "default", defaultEvidenceBatchMaxBytes)
+		return defaultEvidenceBatchMaxBytes
+	}
+	return n
 }
 
 // Init registers one SubjectTemplate per configured main resource type and
@@ -183,6 +210,11 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 	actors := defaultActors()
 	activities := defaultActivities()
 
+	batchMaxBytes := p.evidenceBatchMaxBytes
+	if batchMaxBytes <= 0 {
+		batchMaxBytes = defaultEvidenceBatchMaxBytes
+	}
+
 	totalEvaluatorCalls := 0
 	successfulPolicyCalls := 0
 	var accumulatedErrors error
@@ -210,6 +242,7 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 		clusterContext := buildClusterContext(cfg, cluster)
 
 		clusterEvidences := make([]*proto.Evidence, 0)
+		batch := newEvaluationSizeTracker()
 
 		for _, resourceType := range p.parsedConfig.MainResources {
 			items, hasItems := cluster.Resources[resourceType]
@@ -252,11 +285,16 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 						continue
 					}
 					clusterEvidences = append(clusterEvidences, evidences...)
-					if len(clusterEvidences) >= evidenceBatchSize {
+					batch.add(evidences)
+					if len(clusterEvidences) >= evidenceBatchSize || batch.bytes >= batchMaxBytes {
 						if sendErr := flushEvidences(clusterName, clusterEvidences); sendErr != nil {
 							return &proto.EvalResponse{Status: proto.ExecutionStatus_FAILURE}, sendErr
 						}
+						// Clear before reslicing: the backing array would otherwise keep the
+						// sent evidence, and its input JSON, reachable until overwritten.
+						clear(clusterEvidences)
 						clusterEvidences = clusterEvidences[:0]
+						batch.reset()
 					}
 					successfulPolicyCalls++
 				}
@@ -278,6 +316,36 @@ func (p *Plugin) Eval(req *proto.EvalRequest, apiHelper runner.ApiHelper) (*prot
 	}
 
 	return &proto.EvalResponse{Status: proto.ExecutionStatus_SUCCESS}, nil
+}
+
+// evaluationSizeTracker totals the policy-evaluation bytes held in an evidence batch.
+// Evidences from one evaluation share a PolicyEvaluation, so each is counted once.
+type evaluationSizeTracker struct {
+	seen  map[*proto.PolicyEvaluation]struct{}
+	bytes int
+}
+
+func newEvaluationSizeTracker() *evaluationSizeTracker {
+	return &evaluationSizeTracker{seen: map[*proto.PolicyEvaluation]struct{}{}}
+}
+
+func (t *evaluationSizeTracker) add(evidences []*proto.Evidence) {
+	for _, e := range evidences {
+		evaluation := e.GetPolicyEvaluation()
+		if evaluation == nil {
+			continue
+		}
+		if _, counted := t.seen[evaluation]; counted {
+			continue
+		}
+		t.seen[evaluation] = struct{}{}
+		t.bytes += len(evaluation.GetInput()) + len(evaluation.GetPolicyData())
+	}
+}
+
+func (t *evaluationSizeTracker) reset() {
+	clear(t.seen)
+	t.bytes = 0
 }
 
 // resourceInstance is the per-resource state used to build labels, subjects and inventory.
