@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.3...v0.2.4) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** update aws-sdk-go-v2 monorepo ([#35](https://github.com/compliance-framework/plugin-k8s/issues/35)) ([2191a52](https://github.com/compliance-framework/plugin-k8s/commit/2191a526b42e760196f59030d52de896818dde06))
+
 ## [0.2.3](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.2...v0.2.3) (2026-10-30)
 
 
