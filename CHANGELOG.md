@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.5](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.4...v0.2.5) (2026-11-13)
+
+
+### Bug Fixes
+
+* **deps:** update aws-sdk-go-v2 monorepo ([#39](https://github.com/compliance-framework/plugin-k8s/issues/39)) ([fb963aa](https://github.com/compliance-framework/plugin-k8s/commit/fb963aa2b3de6a8e842638b3cb03d293deb33f8f))
+* **deps:** update aws-sdk-go-v2 monorepo ([#41](https://github.com/compliance-framework/plugin-k8s/issues/41)) ([6edbc7c](https://github.com/compliance-framework/plugin-k8s/commit/6edbc7c2b0d2402365348e6e10beb6e41e465636))
+* **deps:** update aws-sdk-go-v2 monorepo ([#44](https://github.com/compliance-framework/plugin-k8s/issues/44)) ([6afc838](https://github.com/compliance-framework/plugin-k8s/commit/6afc838199d41831336e4e80c4dc4739c5a91847))
+* **deps:** update aws-sdk-go-v2 monorepo ([#47](https://github.com/compliance-framework/plugin-k8s/issues/47)) ([8bd4b0e](https://github.com/compliance-framework/plugin-k8s/commit/8bd4b0eec26df4ae86e81b95fdfe501587818c72))
+* **deps:** update aws-sdk-go-v2 monorepo ([#48](https://github.com/compliance-framework/plugin-k8s/issues/48)) ([28dffc7](https://github.com/compliance-framework/plugin-k8s/commit/28dffc7727f4bde954c8b100f49f860adc71db9b))
+* **deps:** update kubernetes monorepo to v0.37.2 ([#42](https://github.com/compliance-framework/plugin-k8s/issues/42)) ([b18a558](https://github.com/compliance-framework/plugin-k8s/commit/b18a558004ead8a626b735773367fdb5f86073ac))
+* **deps:** update security fixes (gomod) [security] ([#45](https://github.com/compliance-framework/plugin-k8s/issues/45)) ([d90e152](https://github.com/compliance-framework/plugin-k8s/commit/d90e152e59b95d2b666d8e0ee784ca9c125696e8))
+
 ## [0.2.4](https://github.com/compliance-framework/plugin-k8s/compare/v0.2.3...v0.2.4) (2026-11-02)
 
 
